@@ -348,6 +348,57 @@ pub fn import_curve(src: &Path, dest_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dest)
 }
 
+// ---------------------------------------------------------------- steady readings
+
+/// A plausible single-cell reading. The headset sometimes answers 0 mV with flags 0x00, e.g.
+/// while it reconnects [HW 2026-10-16]; such readings must not reach the display or the
+/// recording (a 0 followed by a normal reading would even look like a charge).
+pub fn valid_mv(mv: u16) -> bool {
+    (2500..=5000).contains(&mv)
+}
+
+/// Steadies voltage readings for display. The voltage wanders by ±5–10 mV with the audio load
+/// [HW: 3822–3840 mV within minutes], which on a steep curve flips the percentage up and down.
+/// The shown value is the median of the last 10 minutes, and it only rises again by a clear
+/// step (charging, or rest after a heavy load), so the percentage does not flicker.
+#[derive(Debug, Default, Clone)]
+pub struct Steady {
+    recent: Vec<(u64, u16)>,
+    shown: Option<u16>,
+}
+
+impl Steady {
+    const WINDOW_S: u64 = 10 * 60;
+    const KEEP: usize = 9;
+    pub const RISE_MV: u16 = 15;
+
+    /// Add a reading taken at unix time `t`; returns the value to show (None until a valid
+    /// reading arrived).
+    pub fn push(&mut self, t: u64, mv: u16) -> Option<u16> {
+        if !valid_mv(mv) {
+            return self.shown;
+        }
+        self.recent.push((t, mv));
+        self.recent.retain(|r| r.0 + Self::WINDOW_S >= t);
+        if self.recent.len() > Self::KEEP {
+            self.recent.remove(0);
+        }
+        let mut v: Vec<u16> = self.recent.iter().map(|r| r.1).collect();
+        v.sort_unstable();
+        let median = v[(v.len() - 1) / 2];
+        let shown = match self.shown {
+            Some(s) if median > s && median < s + Self::RISE_MV => s,
+            _ => median,
+        };
+        self.shown = Some(shown);
+        self.shown
+    }
+
+    pub fn shown(&self) -> Option<u16> {
+        self.shown
+    }
+}
+
 // ---------------------------------------------------------------- voltage recording
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -396,6 +447,7 @@ pub fn read_log(dir: &Path, model: u16) -> Vec<Sample> {
                 mv: f.next()?.trim().parse().ok()?,
             })
         })
+        .filter(|s| valid_mv(s.mv))
         .collect()
 }
 
@@ -696,6 +748,28 @@ mod tests {
             })
             .collect();
         assert!(build_from(&short, 1).is_err());
+    }
+
+    #[test]
+    fn steady_ignores_bad_readings_and_noise() {
+        let mut s = Steady::default();
+        assert_eq!(s.push(0, 0), None); // nothing valid yet
+        // the recorded noise from the headset [HW]: no flicker upwards
+        let seq = [3836, 3831, 3832, 3827, 3823, 3826, 3826, 3824, 3826];
+        let mut out = Vec::new();
+        for (i, mv) in seq.into_iter().enumerate() {
+            out.push(s.push(i as u64 * 60, mv).unwrap());
+        }
+        assert!(out.windows(2).all(|w| w[1] <= w[0]), "{out:?}");
+        // a 0 mV reading keeps the last value
+        assert_eq!(s.push(600, 0), s.shown());
+        // a clear rise (charging) shows once it is the median
+        s.push(2000, 3900);
+        assert_eq!(s.push(2010, 3905), Some(3900));
+        // one low outlier does not drag the value down
+        s.push(2020, 3902);
+        assert_eq!(s.push(2030, 3700), Some(3900));
+        assert!(!valid_mv(0) && valid_mv(3800) && !valid_mv(65535));
     }
 
     #[test]

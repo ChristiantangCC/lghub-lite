@@ -174,6 +174,8 @@ struct Dev {
     curve: Option<Curve>,
     /// Lowest voltage since the last charge; a clear rise above it means charging.
     low_mv: u16,
+    /// Steadied voltage for display (median, no flicker upwards).
+    steady: battery::Steady,
     /// What was last reported for the battery, to report only changes.
     last_battery: String,
 }
@@ -506,12 +508,15 @@ fn battery_now(l: &mut Live, index: u8) -> (Option<String>, Option<u8>, Option<u
             Ok(a) => {
                 let mut ignored = Vec::new();
                 report_voltage(l, index, &a, &mut ignored);
-                let c = l.devs.iter().find(|d| d.index == index).and_then(|d| d.curve.as_ref());
-                (
-                    c.map(|c| audio::voltage_text(&a, c)),
-                    c.map(|c| c.percent(a.mv)),
-                    Some(a.mv),
-                )
+                let d = l.devs.iter().find(|d| d.index == index);
+                let shown = d.and_then(|d| d.steady.shown());
+                match (d.and_then(|d| d.curve.as_ref()), shown) {
+                    (Some(c), Some(mv)) => {
+                        let s = Adc { mv, flags: a.flags };
+                        (Some(audio::voltage_text(&s, c)), Some(c.percent(mv)), Some(mv))
+                    }
+                    _ => (Some("not reported right now".into()), None, None),
+                }
             }
             Err(e) => (Some(format!("unreadable: {e}")), None, None),
         };
@@ -607,6 +612,7 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
         model: 0,
         curve: None,
         low_mv: u16::MAX,
+        steady: battery::Steady::default(),
         last_battery: String::new(),
     };
     let (battery, battery_percent) = if has_voltage {
@@ -627,10 +633,14 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
         }
         let c = battery::find_curve(&dir, dev.model);
         let r = match adc {
-            Ok(a) => {
-                dev.last_battery = battery_key(&a, Some(&c));
-                (Some(audio::voltage_text(&a, &c)), Some(c.percent(a.mv)))
-            }
+            Ok(a) => match dev.steady.push(battery::unix_now(), a.mv) {
+                Some(mv) => {
+                    let s = Adc { mv, flags: a.flags };
+                    dev.last_battery = battery_key(&s, Some(&c));
+                    (Some(audio::voltage_text(&s, &c)), Some(c.percent(mv)))
+                }
+                None => (Some("not reported right now".into()), None),
+            },
             Err(e) => (Some(format!("unreadable: {e}")), None),
         };
         dev.curve = Some(c);
@@ -739,15 +749,19 @@ fn report_voltage(l: &mut Live, index: u8, a: &Adc, out: &mut Vec<Update>) {
         return;
     };
     learn(&dir, d, a, &sel, out);
-    let key = battery_key(a, d.curve.as_ref());
+    let Some(mv) = d.steady.push(battery::unix_now(), a.mv) else {
+        return;
+    };
+    let s = Adc { mv, flags: a.flags };
+    let key = battery_key(&s, d.curve.as_ref());
     if key != d.last_battery
         && let Some(c) = &d.curve
     {
         d.last_battery = key;
         out.push(Update::Battery {
             sel,
-            text: audio::voltage_text(a, c),
-            percent: Some(c.percent(a.mv)),
+            text: audio::voltage_text(&s, c),
+            percent: Some(c.percent(mv)),
         });
     }
 }
@@ -755,6 +769,10 @@ fn report_voltage(l: &mut Live, index: u8, a: &Adc, out: &mut Vec<Update>) {
 /// Add the reading to the voltage recording. When charging starts after a discharge (a clear
 /// rise over the lowest voltage seen), build or refine the measured curve from the recording.
 fn learn(dir: &Path, d: &mut Dev, a: &Adc, sel: &str, out: &mut Vec<Update>) {
+    if !battery::valid_mv(a.mv) {
+        crate::verbose(format_args!("{sel}: ignoring battery reading {} mV", a.mv));
+        return;
+    }
     if let Err(e) = battery::record(dir, d.model, a.mv, a.flags) {
         crate::verbose(format_args!("{sel}: voltage recording failed: {e}"));
     }
