@@ -151,6 +151,8 @@ pub struct Snapshot {
     pub curve_label: Option<String>,
     /// State of the voltage recording that measured curves are built from.
     pub recording: Option<String>,
+    /// Hours left in tenths, when the curve knows the full runtime (voltage-only batteries).
+    pub tenths_left: Option<u32>,
     pub dpi: Option<Dpi>,
     /// (current Hz, allowed Hz)
     pub rate: Option<(u32, Vec<u32>)>,
@@ -389,6 +391,10 @@ impl Monitor {
             d.curve = Some(c);
         }
         let (battery, battery_percent, voltage_mv) = battery_now(l, i);
+        let tenths_left = voltage_mv.and_then(|mv| {
+            let d = l.devs.iter().find(|d| d.index == i)?;
+            d.curve.as_ref()?.tenths_of_hours_left(mv)
+        });
         let dpi = optional(device::dpi(&mut l.h, i))?;
         let rate = optional(device::report_rate(&mut l.h, i))?.map(|r| {
             let allowed = (0..8u8)
@@ -415,6 +421,7 @@ impl Monitor {
             needs_curve,
             curve_label,
             recording,
+            tenths_left,
             dpi,
             rate,
             mode,

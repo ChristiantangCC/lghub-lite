@@ -37,24 +37,34 @@ Manager → Startup apps).
 
 ## The app
 
-Double-click **`lghub-lite-gui.exe`**. It lists your devices on the left; select one to see:
+Double-click **`lghub-lite-gui.exe`**. It opens a small battery widget:
 
-- **Battery** as a bar, with time left for headsets that report a voltage (see
-  [Headset battery percentage](#headset-battery-percentage)).
-- **Mode**: "Onboard profile" means the mouse uses settings stored inside it. Click
-  **Use settings from this PC** to change DPI and report rate from here, or
-  **Back to onboard profile** to undo.
-- **DPI** (type a value, **Apply**) and **Report rate** (pick from the list). Every change is
-  read back from the device.
-- **Preset → Save current**: apply these settings automatically whenever the device connects or
-  wakes up.
-- **Event log**: plug/unplug, sleep/wake and setting changes, with timestamps.
+- **The display** shows the selected device: battery percentage, time left, drain per hour,
+  charging state and details such as the connection and, for headsets, the voltage and where
+  the percentage comes from (see [Headset battery percentage](#headset-battery-percentage)).
+  The segment gauge on the right and the **history** strip below show the level; the history
+  has one bar per hour for the last 24 hours. Drain and time left appear after about an hour
+  of readings.
+- **◀ ▶** or a click in the **Devices** list switches device.
+- **Alert at** sets the low-battery level for this device (red line). When a device on battery
+  drops to it, the widget pops up and the tray icon turns red.
+- **Tray** starts the app at login, in the tray, so presets are applied from login on. That
+  replaces the command-line `autostart` entry, so only one of them runs.
+- **Settings** opens the device drawer. For a mouse: **DPI** (type a value, **Apply**),
+  **report rate** and **mode**. "Onboard profile" means the mouse uses settings stored inside
+  it; **Use host** lets this PC set DPI and rate. Every change is read back from the device and
+  saved as the mouse's preset, so it is applied again whenever the mouse connects; **Use
+  onboard** goes back and removes the preset. For a headset: the battery curve and its
+  recording.
+- **Skins** opens the skin manager: five built-in looks, colour editing (edits are saved as your
+  own skin), and **Load skin file…** / **Export current** to share skins as small `.json`
+  files. You can also drop a skin file on the window. Custom skins live in
+  `%APPDATA%\lghub-lite\skins\`.
 
-Closing the window keeps it running in the **tray** (the tooltip shows battery levels); use
-the tray menu's **Quit** to exit. Tick **Start at login (in the tray)** to have presets applied
-from login on. That replaces the command-line `autostart` entry, so only one of them runs.
+The round buttons in the title bar minimise the widget or hide it to the **tray** (the tooltip
+shows battery levels); drag the title bar to move it. Use the tray menu's **Quit** to exit.
 
-The app is about 4.4 MB and uses roughly 180 MB of memory, mostly the graphics driver (it
+The app is about 4.6 MB and uses roughly 150 MB of memory, mostly the graphics driver (it
 draws with OpenGL). It uses no CPU while idle. If you want the smallest footprint, use the
 command-line tool and `lghub-lite autostart on` (about 5 MB of memory) instead.
 

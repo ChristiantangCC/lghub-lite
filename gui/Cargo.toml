@@ -20,5 +20,6 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Threading",       # single-instance mutex
+    "Win32_UI_Controls_Dialogs",    # open/save dialogs for skin files
     "Win32_UI_WindowsAndMessaging", # show/hide the window from the tray
 ] }

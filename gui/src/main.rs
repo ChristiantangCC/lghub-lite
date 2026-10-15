@@ -1,4 +1,4 @@
-//! lghub-lite-gui: a small window + tray front end over the lghub-lite library.
+//! lghub-lite-gui: a small skinnable battery widget + tray front end over the lghub-lite library.
 //! Not affiliated with or endorsed by Logitech.
 //!
 //! Threads: the UI thread runs eframe; one worker thread owns the `watch::Monitor` and does all
@@ -8,22 +8,29 @@
 //! worker sleeps in the same WaitForMultipleObjects as `lghub-lite watch`.
 #![windows_subsystem = "windows"]
 
-use std::collections::VecDeque;
+mod history;
+mod skin;
+mod view;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
-use lghub_lite::device::{Event, MODE_HOST, MODE_ONBOARD};
+use history::History;
+use lghub_lite::device::{Event, MODE_ONBOARD};
 use lghub_lite::hid::Waker;
-use lghub_lite::watch::{self, Cmd, Monitor, Snapshot, Update};
+use lghub_lite::watch::{Cmd, Monitor, Snapshot, Update};
 use lghub_lite::{autostart, battery, config, hidpp};
+use skin::{Settings, Skin};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 const TITLE: &str = "lghub-lite";
-const LOG_LINES: usize = 200;
+/// Messages under the controls disappear after this long.
+const MESSAGE_TIME: Duration = Duration::from_secs(8);
 
 enum ToWorker {
     Exec(String, Cmd),
@@ -42,6 +49,18 @@ struct Row {
     battery: Option<String>,
     percent: Option<u8>,
     online: bool,
+    protocol: Option<(u8, u8)>,
+    history: History,
+    /// The low-battery alert fired and the level has not risen above the threshold since.
+    alerted: bool,
+}
+
+impl Row {
+    fn charging(&self) -> bool {
+        self.battery
+            .as_deref()
+            .is_some_and(|b| b.contains("charging") && !b.contains("discharging") || b.contains("full"))
+    }
 }
 
 /// Flags set by tray callbacks (which run outside `logic`) and consumed in `logic`.
@@ -60,19 +79,29 @@ struct App {
     snap: Option<Snapshot>,
     pending: usize,
     dpi_input: String,
-    message: Option<(bool, String)>, // (is_error, text)
-    log: VecDeque<String>,
+    /// (is_error, text, when)
+    message: Option<(bool, String, Instant)>,
     fatal: Option<String>,
     tray: Option<TrayIcon>,
     tray_tip: String,
+    tray_low: bool,
     flags: Arc<TrayFlags>,
     quitting: bool,
     autostart_gui: bool,
     bg_running: bool,
-    /// Folder of the preset file; battery curve files live here too.
-    curve_dir: PathBuf,
-    /// For a voltage-only device without a curve: (model, G HUB curve file if found).
+    /// Folder of the preset file: battery curves, history, skins and app settings live here.
+    dir: PathBuf,
+    /// For a voltage-only device on the estimate: (model, G HUB curve file if found).
     ghub_curve: Option<(u16, Option<PathBuf>)>,
+    /// After a DPI/report-rate change succeeds, save the values as the model's preset.
+    save_preset: bool,
+    skins: Vec<Skin>,
+    settings: Settings,
+    drawer: bool,
+    show_skins: bool,
+    skin_msg: Option<(bool, String)>,
+    /// A custom skin was edited; saved once editing pauses.
+    skin_dirty: Option<Instant>,
 }
 
 fn main() {
@@ -92,12 +121,15 @@ fn main() {
     }
     let bg_running = win::mutex_exists("Local\\lghub-lite-bg");
 
-    let (w, h, rgba) = icon_rgba();
+    let (w, h, rgba) = icon_rgba(false);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([640.0, 440.0])
-            .with_min_inner_size([520.0, 340.0])
+            .with_inner_size([view::WIDGET_W, 420.0])
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_drag_and_drop(true)
             .with_icon(egui::IconData {
                 rgba,
                 width: w,
@@ -116,7 +148,7 @@ fn main() {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, cfg: PathBuf, bg_running: bool) -> App {
         let ctx = cc.egui_ctx.clone();
-        let curve_dir = cfg.parent().map(PathBuf::from).unwrap_or_default();
+        let dir = cfg.parent().map(PathBuf::from).unwrap_or_default();
         let (tx, worker_rx) = channel();
         let (worker_tx, rx) = channel();
         let waker = Arc::new(Waker::new().expect("cannot create event"));
@@ -130,6 +162,9 @@ impl App {
             .ok()
             .flatten()
             .is_some_and(|c| c.contains("lghub-lite-gui"));
+        let mut skins = skin::builtins();
+        skins.extend(skin::load_custom(&dir.join("skins")));
+        let settings = Settings::load(&dir.join("app.txt"));
         App {
             tx,
             rx,
@@ -140,17 +175,56 @@ impl App {
             pending: 0,
             dpi_input: String::new(),
             message: None,
-            log: VecDeque::new(),
             fatal: None,
             tray,
             tray_tip: String::new(),
+            tray_low: false,
             flags,
             quitting: false,
             autostart_gui,
             bg_running,
-            curve_dir,
+            dir,
             ghub_curve: None,
+            save_preset: false,
+            skins,
+            settings,
+            drawer: false,
+            show_skins: false,
+            skin_msg: None,
+            skin_dirty: None,
         }
+    }
+
+    fn skin(&self) -> &Skin {
+        self.skins
+            .iter()
+            .find(|s| s.id == self.settings.skin)
+            .unwrap_or(&self.skins[0])
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save(&self.dir.join("app.txt")) {
+            self.say(true, format!("settings not saved: {e}"));
+        }
+    }
+
+    fn say(&mut self, err: bool, text: String) {
+        self.message = Some((err, text, Instant::now()));
+    }
+
+    /// Alert level for a device: saved, else 15 % for voltage-only headsets and 20 % otherwise.
+    fn alert_level(&self, sel: &str) -> u8 {
+        self.settings.alert(sel).unwrap_or_else(|| {
+            let voltage_only = self
+                .snap
+                .as_ref()
+                .is_some_and(|s| s.sel == sel && s.voltage_mv.is_some())
+                || self
+                    .rows
+                    .iter()
+                    .any(|r| r.sel == sel && r.battery.as_deref().is_some_and(|b| b.contains(" mV")));
+            if voltage_only { 15 } else { 20 }
+        })
     }
 
     fn send(&mut self, sel: &str, cmd: Cmd) {
@@ -165,37 +239,67 @@ impl App {
         }
     }
 
-    fn on_update(&mut self, u: Update) {
-        self.log
-            .push_back(format!("{} {}", watch::now(), u.to_string().trim_start()));
-        while self.log.len() > LOG_LINES {
-            self.log.pop_front();
+    fn select(&mut self, sel: String) {
+        if self.selected.as_deref() != Some(sel.as_str()) {
+            self.selected = Some(sel);
+            self.snap = None;
+            self.message = None;
+            self.refresh_selected();
         }
+    }
+
+    /// New battery reading for a row: remember it, add it to the history, check the alert.
+    fn set_battery(&mut self, sel: &str, text: Option<String>, percent: Option<u8>) {
+        let level = self.alert_level(sel);
+        let Some(r) = self.rows.iter_mut().find(|r| r.sel == sel) else {
+            return;
+        };
+        r.battery = text;
+        r.percent = percent;
+        let Some(p) = percent else { return };
+        r.history.add(history::now(), p);
+        if p > level {
+            r.alerted = false;
+        } else if !r.alerted && !r.charging() {
+            r.alerted = true;
+            let msg = format!("{} battery low: {p}%", r.name);
+            self.say(true, msg);
+            self.flags.show.store(true, Ordering::Relaxed); // bring the widget up once
+        }
+    }
+
+    fn on_update(&mut self, u: Update) {
         let mut refresh = false;
         match u {
             Update::Added {
                 sel,
                 name,
+                protocol,
                 battery,
                 battery_percent,
-                ..
             } => {
                 refresh = self.selected.as_deref() == Some(sel.as_str());
                 match self.rows.iter_mut().find(|r| r.sel == sel) {
                     Some(r) => {
                         r.name = name;
-                        r.battery = battery;
-                        r.percent = battery_percent;
                         r.online = true;
+                        r.protocol = Some(protocol);
                     }
-                    None => self.rows.push(Row {
-                        sel,
-                        name,
-                        battery,
-                        percent: battery_percent,
-                        online: true,
-                    }),
+                    None => {
+                        let history = History::load(&self.dir, &sel);
+                        self.rows.push(Row {
+                            sel: sel.clone(),
+                            name,
+                            battery: None,
+                            percent: None,
+                            online: true,
+                            protocol: Some(protocol),
+                            history,
+                            alerted: false,
+                        })
+                    }
                 }
+                self.set_battery(&sel, battery, battery_percent);
             }
             Update::Offline { sel, .. } => {
                 if let Some(r) = self.rows.iter_mut().find(|r| r.sel == sel) {
@@ -210,10 +314,8 @@ impl App {
                 }
             }
             Update::Battery { sel, text, percent } => {
-                if let Some(r) = self.rows.iter_mut().find(|r| r.sel == sel) {
-                    r.battery = Some(text);
-                    r.percent = percent;
-                }
+                refresh = self.selected.as_deref() == Some(sel.as_str());
+                self.set_battery(&sel, Some(text), percent);
             }
             Update::Event { sel, event } => {
                 match &event {
@@ -222,12 +324,7 @@ impl App {
                             r.online = false;
                         }
                     }
-                    Event::Battery(b) => {
-                        if let Some(r) = self.rows.iter_mut().find(|r| r.sel == sel) {
-                            r.battery = Some(b.to_string());
-                            r.percent = b.percent();
-                        }
-                    }
+                    Event::Battery(b) => self.set_battery(&sel, Some(b.to_string()), b.percent()),
                     _ => {}
                 }
                 refresh = self.selected.as_deref() == Some(sel.as_str())
@@ -247,7 +344,44 @@ impl App {
         }
     }
 
-    fn update_tray_tip(&mut self) {
+    fn on_snapshot(&mut self, sel: String, r: Result<Snapshot, String>) {
+        self.pending = self.pending.saturating_sub(1);
+        match r {
+            Ok(s) => {
+                // A DPI/rate change went through: keep it as the model's preset, so it comes
+                // back whenever the mouse connects (host-mode settings do not survive on it).
+                if std::mem::take(&mut self.save_preset) && s.mode != Some(MODE_ONBOARD) {
+                    let (dpi, rate) = (s.dpi.as_ref().map(|d| d.current), s.rate.as_ref().map(|r| r.0));
+                    if s.preset.as_ref().is_none_or(|p| p.dpi != dpi || p.rate != rate) {
+                        self.send(&sel, Cmd::SavePreset { dpi, rate });
+                    }
+                }
+                if self.selected.as_deref() != Some(sel.as_str()) {
+                    return;
+                }
+                if let Some(d) = &s.dpi {
+                    self.dpi_input = d.current.to_string();
+                }
+                if s.needs_curve
+                    && let Some(m) = s.model
+                    && self.ghub_curve.as_ref().is_none_or(|g| g.0 != m)
+                {
+                    self.ghub_curve = Some((m, battery::find_ghub_curve(m)));
+                }
+                if let Some(row) = self.rows.iter_mut().find(|r| r.sel == sel) {
+                    row.battery = s.battery.clone();
+                    row.percent = s.battery_percent;
+                }
+                self.snap = Some(s);
+            }
+            Err(e) => {
+                self.save_preset = false;
+                self.say(true, e);
+            }
+        }
+    }
+
+    fn update_tray(&mut self) {
         let parts: Vec<String> = self
             .rows
             .iter()
@@ -262,12 +396,18 @@ impl App {
         } else {
             format!("{TITLE}\n{}", parts.join("\n"))
         };
-        if tip != self.tray_tip {
-            if let Some(t) = &self.tray {
+        let low = self.rows.iter().any(|r| r.online && r.alerted);
+        if let Some(t) = &self.tray {
+            if tip != self.tray_tip {
                 let _ = t.set_tooltip(Some(&tip));
             }
-            self.tray_tip = tip;
+            if low != self.tray_low {
+                let (w, h, rgba) = icon_rgba(low);
+                let _ = t.set_icon(tray_icon::Icon::from_rgba(rgba, w, h).ok());
+            }
         }
+        self.tray_tip = tip;
+        self.tray_low = low;
     }
 
     fn set_autostart(&mut self, on: bool) {
@@ -288,7 +428,7 @@ impl App {
         };
         match r {
             Ok(()) => self.autostart_gui = on,
-            Err(e) => self.message = Some((true, format!("autostart: {e}"))),
+            Err(e) => self.say(true, format!("start at login: {e}")),
         }
     }
 }
@@ -327,7 +467,7 @@ fn worker(
             Ok(updates) => updates.into_iter().for_each(|u| send(FromWorker::Update(u))),
             Err(e) => {
                 send(FromWorker::Update(Update::Line(format!("error: {e}"))));
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::sleep(Duration::from_secs(1));
             }
         }
     }
@@ -340,33 +480,25 @@ impl eframe::App for App {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 FromWorker::Update(u) => self.on_update(u),
-                FromWorker::Snapshot(sel, r) => {
-                    self.pending = self.pending.saturating_sub(1);
-                    match r {
-                        Ok(s) if self.selected.as_deref() == Some(sel.as_str()) => {
-                            if let Some(d) = &s.dpi {
-                                self.dpi_input = d.current.to_string();
-                            }
-                            if s.needs_curve
-                                && let Some(m) = s.model
-                                && self.ghub_curve.as_ref().is_none_or(|g| g.0 != m)
-                            {
-                                self.ghub_curve = Some((m, battery::find_ghub_curve(m)));
-                            }
-                            if let Some(row) = self.rows.iter_mut().find(|r| r.sel == sel) {
-                                row.battery = s.battery.clone();
-                                row.percent = s.battery_percent;
-                            }
-                            self.snap = Some(s);
-                        }
-                        Ok(_) => {}
-                        Err(e) => self.message = Some((true, e)),
-                    }
-                }
+                FromWorker::Snapshot(sel, r) => self.on_snapshot(sel, r),
                 FromWorker::Fatal(e) => self.fatal = Some(e),
             }
         }
-        self.update_tray_tip();
+        self.update_tray();
+        if self.message.as_ref().is_some_and(|m| m.2.elapsed() > MESSAGE_TIME) {
+            self.message = None;
+        }
+        if let Some(t) = self.skin_dirty {
+            if t.elapsed() > Duration::from_millis(600) {
+                self.skin_dirty = None;
+                let (dir, k) = (self.dir.join("skins"), self.skin().clone());
+                if let Err(e) = skin::save(&dir, &k) {
+                    self.skin_msg = Some((false, format!("Skin not saved: {e}")));
+                }
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(650));
+            }
+        }
 
         if self.flags.show.swap(false, Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -385,282 +517,11 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::bottom("footer").show(ui, |ui| self.footer(ui));
-        egui::Panel::left("devices")
-            .resizable(false)
-            .exact_size(190.0)
-            .show(ui, |ui| self.device_list(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.details(ui));
-    }
-}
-
-impl App {
-    fn device_list(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Devices");
-        ui.add_space(4.0);
-        if self.rows.is_empty() {
-            ui.label(if self.fatal.is_some() {
-                "Device access failed."
-            } else {
-                "Looking for devices…"
-            });
-        }
-        let mut clicked = None;
-        for r in &self.rows {
-            let pct = r.percent.map(|p| format!("  {p}%")).unwrap_or_default();
-            let text = format!("{}{pct}\n{}", r.name, if r.online { r.sel.as_str() } else { "offline" });
-            let selected = self.selected.as_deref() == Some(r.sel.as_str());
-            let label = egui::RichText::new(text);
-            let label = if r.online { label } else { label.weak() };
-            if ui.selectable_label(selected, label).clicked() && !selected {
-                clicked = Some(r.sel.clone());
-            }
-        }
-        if let Some(sel) = clicked {
-            self.selected = Some(sel);
-            self.snap = None;
-            self.message = None;
-            self.refresh_selected();
-        }
+        self.draw(ui);
     }
 
-    fn details(&mut self, ui: &mut egui::Ui) {
-        if let Some(e) = &self.fatal {
-            ui.colored_label(ui.visuals().error_fg_color, format!("Cannot watch devices: {e}"));
-            return;
-        }
-        let Some(sel) = self.selected.clone() else {
-            ui.label("Select a device.");
-            return;
-        };
-        let online = self.rows.iter().any(|r| r.sel == sel && r.online);
-        let Some(s) = self.snap.as_ref().filter(|s| s.sel == sel) else {
-            if let Some((true, e)) = &self.message {
-                ui.colored_label(ui.visuals().error_fg_color, e);
-                if ui.button("Try again").clicked() {
-                    self.message = None;
-                    self.refresh_selected();
-                }
-            } else if online {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Reading device…");
-                });
-            } else {
-                ui.label("The device is offline. Move it or switch it on.");
-            }
-            return;
-        };
-        let busy = self.pending > 0;
-        ui.horizontal(|ui| {
-            ui.heading(&s.name);
-            ui.weak(&s.sel);
-            if busy {
-                ui.spinner();
-            }
-        });
-        ui.add_space(6.0);
-
-        // Battery
-        let mut import: Option<PathBuf> = None;
-        let mut cmd: Option<Cmd> = None;
-        match (s.battery_percent, &s.battery) {
-            (Some(p), text) => {
-                let detail = text.as_deref().unwrap_or("");
-                let approx = if s.needs_curve { "≈ " } else { "" };
-                ui.add(
-                    egui::ProgressBar::new(p as f32 / 100.0)
-                        .text(format!("{approx}{p}%"))
-                        .desired_width(260.0),
-                );
-                ui.weak(detail);
-            }
-            (None, Some(t)) => {
-                ui.label(format!("Battery: {t}"));
-            }
-            (None, None) => {}
-        }
-        if let Some(label) = &s.curve_label {
-            egui::CollapsingHeader::new("Battery curve")
-                .default_open(s.needs_curve)
-                .show(ui, |ui| {
-                    ui.label(format!("Percentage from: {label}."));
-                    if s.needs_curve {
-                        ui.label("This headset only reports its voltage, so for now the percentage is a generic estimate. lghub-lite records the voltage while it runs; after one full discharge (from full to nearly empty, then charging) it builds a curve measured on your own headset and uses that instead. Every later full discharge refines it.");
-                    }
-                    if let Some(r) = &s.recording {
-                        ui.weak(format!("Recording: {r}"));
-                    }
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("Build from recording")
-                            .on_hover_text("Build or refine the measured curve now (also happens on its own when the headset starts charging)")
-                            .clicked()
-                        {
-                            cmd = Some(Cmd::BuildCurve);
-                        }
-                        if s.needs_curve
-                            && let Some(src) = self.ghub_curve.as_ref().and_then(|g| g.1.clone())
-                            && ui
-                                .button("Import from G HUB")
-                                .on_hover_text(src.display().to_string())
-                                .clicked()
-                        {
-                            import = Some(src);
-                        }
-                        if ui.button("Open folder").on_hover_text(self.curve_dir.display().to_string()).clicked() {
-                            let _ = std::fs::create_dir_all(&self.curve_dir);
-                            let _ = std::process::Command::new("explorer").arg(&self.curve_dir).spawn();
-                        }
-                    });
-                });
-        }
-        ui.add_space(8.0);
-
-        let onboard = s.mode == Some(MODE_ONBOARD);
-        egui::Grid::new("settings")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                if let Some(m) = s.mode {
-                    ui.label("Mode");
-                    ui.horizontal(|ui| {
-                        if m == MODE_ONBOARD {
-                            ui.label("Onboard profile (set on the mouse)");
-                            if ui
-                                .add_enabled(!busy, egui::Button::new("Use settings from this PC"))
-                                .clicked()
-                            {
-                                cmd = Some(Cmd::SetMode(MODE_HOST));
-                            }
-                        } else {
-                            ui.label("Host (settings from this PC)");
-                            if ui
-                                .add_enabled(!busy, egui::Button::new("Back to onboard profile"))
-                                .clicked()
-                            {
-                                cmd = Some(Cmd::SetMode(MODE_ONBOARD));
-                            }
-                        }
-                    });
-                    ui.end_row();
-                }
-                if let Some(d) = &s.dpi {
-                    ui.label("DPI");
-                    ui.horizontal(|ui| {
-                        let edit = egui::TextEdit::singleline(&mut self.dpi_input).desired_width(70.0);
-                        let r = ui.add_enabled(!onboard && !busy, edit);
-                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let apply = ui.add_enabled(!onboard && !busy, egui::Button::new("Apply")).clicked();
-                        if apply || enter {
-                            match self.dpi_input.trim().parse::<u16>() {
-                                Ok(v) if d.caps.allows(v) => cmd = Some(Cmd::SetDpi(v)),
-                                _ => self.message = Some((true, format!("DPI must be one of: {}", d.caps))),
-                            }
-                        }
-                        ui.weak(format!("now {}", d.current));
-                    });
-                    ui.end_row();
-                }
-                if let Some((current, allowed)) = &s.rate {
-                    ui.label("Report rate");
-                    let mut pick = *current;
-                    ui.add_enabled_ui(!onboard && !busy, |ui| {
-                        egui::ComboBox::from_id_salt("rate")
-                            .selected_text(format!("{current} Hz"))
-                            .show_ui(ui, |ui| {
-                                for hz in allowed {
-                                    ui.selectable_value(&mut pick, *hz, format!("{hz} Hz"));
-                                }
-                            });
-                    });
-                    if pick != *current {
-                        cmd = Some(Cmd::SetRate(pick));
-                    }
-                    ui.end_row();
-                }
-                if s.dpi.is_some() || s.rate.is_some() {
-                    ui.label("Preset");
-                    ui.horizontal(|ui| {
-                        match &s.preset {
-                            Some(p) => ui.label(config::line(p).split_once(' ').map_or("", |x| x.1).to_string()),
-                            None => ui.weak("none"),
-                        };
-                        let save = egui::Button::new("Save current");
-                        if ui
-                            .add_enabled(!busy, save)
-                            .on_hover_text("Apply these settings every time it connects")
-                            .clicked()
-                        {
-                            cmd = Some(Cmd::SavePreset {
-                                dpi: s.dpi.as_ref().map(|d| d.current),
-                                rate: s.rate.as_ref().map(|r| r.0),
-                            });
-                        }
-                        if s.preset.is_some() && ui.add_enabled(!busy, egui::Button::new("Clear")).clicked() {
-                            cmd = Some(Cmd::SavePreset { dpi: None, rate: None });
-                        }
-                    });
-                    ui.end_row();
-                }
-            });
-        if onboard && (s.dpi.is_some() || s.rate.is_some()) {
-            ui.weak("DPI and report rate can be changed after switching to settings from this PC.");
-        }
-        if let Some(c) = cmd {
-            self.message = None;
-            self.send(&sel, c);
-        }
-        if let Some(src) = import {
-            match battery::import_curve(&src, &self.curve_dir) {
-                Ok(dest) => {
-                    self.message = Some((false, format!("Imported {}", dest.display())));
-                    self.ghub_curve = None;
-                    self.send(&sel, Cmd::Refresh);
-                }
-                Err(e) => self.message = Some((true, format!("Import failed: {e}"))),
-            }
-        }
-        if let Some((err, text)) = &self.message {
-            let color = if *err {
-                ui.visuals().error_fg_color
-            } else {
-                ui.visuals().text_color()
-            };
-            ui.colored_label(color, text);
-        }
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Event log")
-            .default_open(false)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(140.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for l in &self.log {
-                            ui.monospace(l);
-                        }
-                    });
-            });
-    }
-
-    fn footer(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let mut on = self.autostart_gui;
-            if ui
-                .checkbox(&mut on, "Start at login (in the tray)")
-                .on_hover_text("Applies saved presets whenever a device connects")
-                .changed()
-            {
-                self.set_autostart(on);
-            }
-            if self.bg_running {
-                ui.weak("· presets are applied by lghub-lite-bg");
-            }
-        });
-        ui.weak("Not affiliated with or endorsed by Logitech.");
-        ui.add_space(2.0);
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4] // transparent: the widget paints its own rounded frame
     }
 }
 
@@ -668,7 +529,7 @@ fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
     let open = MenuItem::new("Open", true, None);
     let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::with_items(&[&open, &quit]).ok()?;
-    let (w, h, rgba) = icon_rgba();
+    let (w, h, rgba) = icon_rgba(false);
     let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -708,10 +569,12 @@ fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
 }
 
 /// 32×32 RGBA app/tray icon drawn in code (a mouse outline), so no image assets are needed.
-fn icon_rgba() -> (u32, u32, Vec<u8>) {
-    static ICON: Mutex<Option<Vec<u8>>> = Mutex::new(None);
-    let mut cache = ICON.lock().unwrap_or_else(|e| e.into_inner());
-    let px = cache.get_or_insert_with(|| {
+/// `low` draws it red, for a device under its alert level.
+fn icon_rgba(low: bool) -> (u32, u32, Vec<u8>) {
+    static ICONS: Mutex<[Option<Vec<u8>>; 2]> = Mutex::new([None, None]);
+    let mut cache = ICONS.lock().unwrap_or_else(|e| e.into_inner());
+    let px = cache[low as usize].get_or_insert_with(|| {
+        let body: [u8; 4] = if low { [235, 64, 52, 255] } else { [38, 132, 255, 255] };
         let mut px = vec![0u8; 32 * 32 * 4];
         for y in 0..32 {
             for x in 0..32 {
@@ -724,7 +587,7 @@ fn icon_rgba() -> (u32, u32, Vec<u8>) {
                 } else if line && d < 0.92 {
                     [255, 255, 255, 255]
                 } else {
-                    [38, 132, 255, 255]
+                    body
                 };
                 px[i..i + 4].copy_from_slice(&color);
             }
@@ -734,10 +597,15 @@ fn icon_rgba() -> (u32, u32, Vec<u8>) {
     (32, 32, px.clone())
 }
 
-/// Small Win32 helpers: single instance and bringing an existing window forward.
+/// Small Win32 helpers: single instance, bringing an existing window forward, file dialogs.
 mod win {
+    use std::path::PathBuf;
+
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OPENFILENAMEW,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_SHOW, SetForegroundWindow, ShowWindow};
 
     fn wide(s: &str) -> Vec<u16> {
@@ -775,5 +643,38 @@ mod win {
                 SetForegroundWindow(w);
             }
         }
+    }
+
+    /// The standard Windows open/save dialog for skin files. `save` proposes `name`.
+    pub fn skin_file_dialog(save: bool, name: &str) -> Option<PathBuf> {
+        let filter: Vec<u16> = "Skin files (*.json)\0*.json\0All files\0*.*\0\0"
+            .encode_utf16()
+            .collect();
+        let mut buf = [0u16; 1024];
+        for (i, c) in name.encode_utf16().take(buf.len() - 1).enumerate() {
+            buf[i] = c;
+        }
+        let ext = wide("json");
+        // SAFETY: zeroed is a valid OPENFILENAMEW; the pointers below outlive the call.
+        let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = buf.as_mut_ptr();
+        ofn.nMaxFile = buf.len() as u32;
+        ofn.lpstrDefExt = ext.as_ptr();
+        ofn.Flags = OFN_NOCHANGEDIR | if save { OFN_OVERWRITEPROMPT } else { OFN_FILEMUSTEXIST };
+        // SAFETY: ofn is fully initialised for the call.
+        let ok = unsafe {
+            if save {
+                GetSaveFileNameW(&mut ofn)
+            } else {
+                GetOpenFileNameW(&mut ofn)
+            }
+        };
+        if ok == 0 {
+            return None;
+        }
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
     }
 }

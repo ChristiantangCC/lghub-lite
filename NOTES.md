@@ -34,7 +34,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `profiles <dev>`, `dump <dev> <file>` | ✅ read-only 0x8100 onboard memory: info, active profile, user/factory directories, per-sector CRC status, full text backup (atomic write). Nothing is written to the device. SL2 backup saved at `%APPDATA%\lghub-lite\onboard-backup-40a9-2026-10-15.txt` |
 | `autostart [on\|off]` | ✅ per-user login entry (HKCU `Run` value `lghub-lite`) for `lghub-lite-bg.exe`; `on` also starts it, `off` also stops it [HW: on → running, second copy exits, log written; off → entry removed, process ended] |
 | `lghub-lite-bg.exe` | ✅ windowless `watch` (single instance via the `Local\lghub-lite-bg` mutex), output with timestamps in `watch.log` next to the preset file, moved to `watch.log.old` at start-up once over 1 MB |
-| `lghub-lite-gui.exe` | ✅ (Windows) egui window + tray, in the separate `gui/` package. [HW]: lists the SL2 and headset with battery (headset bar 73 %); close hides to the tray; hidden idle 0 ms CPU over 20 s; a second launch re-shows the window and exits. Clicking through DPI/rate/mode/preset in the window still needs a human test (TEST REQUEST 10); the same `Monitor::exec` code is hardware-verified via the CLI |
+| `lghub-lite-gui.exe` | ✅ (Windows) egui window + tray, in the separate `gui/` package. [HW]: lists the SL2 and headset with battery (headset bar 73 %); close hides to the tray; hidden idle 0 ms CPU over 20 s; a second launch re-shows the window and exits. Redesigned 2026-10-16 as a skinnable undecorated widget (display, segment gauge, 24 h history from `history-<device>.csv`, alert level, settings drawer, skin manager with `.json` skins); [HW] renders both devices, 0 ms CPU idle over 15 s. Clicking through it still needs a human test (TEST REQUEST 10); the same `Monitor::exec` code is hardware-verified via the CLI |
 | sidetone | ❌ removed: 0x8300 level reads and writes back, but a human heard no effect at 50 (2026-10-15). Facts are kept in §2 Headset |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
@@ -323,14 +323,16 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 
 TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on 2026-10-15; see §5.
 
-**TEST REQUEST 10: the app.**
-- Run `lghub-lite-gui.exe`, select **PRO X 2**, and check that mode, DPI, report rate and battery show.
-- Click **Use settings from this PC**: mode becomes Host.
-- Set DPI 1600, then **Apply**: "now 1600", and the cursor is faster. Pick a different report rate.
-- **Save current** as preset; switch the mouse off and on: the log shows "preset applied".
-- Restore: DPI 800, **Back to onboard profile**, **Clear** the preset.
-- Close the window: the tray icon remains and its tooltip shows battery. Left-click it: the window returns. Tray menu **Quit**: the app exits.
-- Tick **Start at login**, check that `lghub-lite autostart` shows the GUI entry, then untick it.
+**TEST REQUEST 10: the app** (redesigned 2026-10-16 as the "Battery Tracker v3" widget).
+- Run `lghub-lite-gui.exe`. ◀ ▶ and the Devices list switch between **PRO X 2** and the headset; the display, gauge and history follow.
+- PRO X 2, **Settings**: the drawer opens. **Use host**: mode becomes "Host — settings from this PC".
+- DPI 1600, **Apply**: "now 1600", the cursor is faster. Pick another rate chip. `lghub-lite presets` now shows that DPI and rate (saved automatically). Switch the mouse off and on: they come back.
+- Restore: DPI 800 and your usual rate, then **Use onboard**: mode is "Onboard profile" and `lghub-lite presets` no longer lists the mouse.
+- Headset, **Settings**: the battery curve line, the recording tooltip on **Build from recording**, and **Open folder** work.
+- **Alert at** + / −: the red line moves on the gauge and the history; the value is kept after a restart.
+- **Skins**: pick each built-in (Amber shows pixel digits); change a colour on a built-in: a "(mine)" skin appears and is selected; **Export current** saves a `.json`; **Load skin file…** that file back; restart: the chosen skin is kept.
+- Title bar: drag moves the widget; the left round button minimises; the right one hides it to the tray. Left-click the tray icon: the widget returns. Tray menu **Quit**: the app exits.
+- **Tray** button: `lghub-lite autostart` shows the GUI entry; click again to remove it.
 
 **TEST REQUEST 11: measured headset curve.** Needs one full discharge, no G HUB.
 - Charge the headset fully, then use it with the app (or `lghub-lite-bg`) running until it is nearly empty or switches off, then plug it in to charge with the app still running.
@@ -388,7 +390,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 |---|---|
 | `lghub-lite.exe` | **311,296 B** (measured battery curves, recording, `curve` command: +22.5 KB) |
 | `lghub-lite-bg.exe` | **249,856 B** (+20.5 KB, same cause) |
-| `lghub-lite-gui.exe` | **4,397,056 B** (eframe/glow + tray-icon) |
+| `lghub-lite-gui.exe` | **4,564,480 B** (eframe/glow + tray-icon; Battery Tracker v3 widget, skins and history: +167 KB) |
 | Crates | core: 3 (`lghub-lite`, `windows-sys`, `windows-link`), unchanged; GUI package: 122 |
 | `devices` wall time | median 115 ms (10 runs; headset + receiver, includes HID++ round trips) |
 | `watch` / `lghub-lite-bg` idle | **0 ms CPU** over 30 s, 1 thread between events, ~5.6 MB working set; one 0x1F20 read per 5 min when a voltage-only headset is present |
