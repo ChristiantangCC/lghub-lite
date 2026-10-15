@@ -578,6 +578,95 @@ pub fn mode_name(m: u8) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------- events
+
+/// Feature IDs whose events `decode_event` understands.
+pub const EVENT_FEATURES: [u16; 3] = [0x1004, 0x2202, 0x8061];
+
+#[derive(Debug, PartialEq)]
+pub enum Event {
+    /// Receiver 0x41 device connection: device index (slot+1), link up/down, wireless PID,
+    /// device type nibble, protocol byte. [OBS §9.8 UnifyingBus::onRead]
+    Connection {
+        index: u8,
+        online: bool,
+        wpid: u16,
+        kind: u8,
+        protocol: u8,
+    },
+    /// Receiver 0x40 with byte 3 == 0x02: device unpaired or disconnected. [OBS §9.8]
+    Disconnected { index: u8 },
+    /// 0x1004 event, same layout as f1. [OBS §10.5]
+    Battery(Battery),
+    /// 0x2202 event [sensor, X BE16, Y BE16, lod]. [HW SL2 after f6 and after mode change]
+    Dpi { x: u16, y: u16, lod: u8 },
+    /// 0x8061 event [connType, rate bit]. [HW SL2: `11 FF 0C 00 00 02` wired after setting
+    /// bit 2; `11 01 0C 00 01 03` over the receiver]
+    ReportRate { conn: u8, bit: u8 },
+}
+
+/// Decode an unsolicited report. `feats` maps feature index -> feature ID for the device at
+/// `r[1]`. HID++ 2.0 events have swid 0 [OBS §9.5]. Returns None for anything else
+/// (replies to other software, unknown events).
+pub fn decode_event(r: &[u8], feats: &[(u8, u16)]) -> Option<Event> {
+    if r.len() < 7 {
+        return None;
+    }
+    match r[2] {
+        0x41 => Some(Event::Connection {
+            index: r[1],
+            online: r[4] & 0x40 == 0,
+            wpid: u16::from_le_bytes([r[5], r[6]]),
+            kind: r[4] & 0x0F,
+            protocol: r[3],
+        }),
+        0x40 if r[3] == 0x02 => Some(Event::Disconnected { index: r[1] }),
+        idx if r[3] & 0x0F == 0 && r[3] >> 4 == 0 => {
+            let id = feats.iter().find(|(i, _)| *i == idx)?.1;
+            let p = &r[4..];
+            match id {
+                0x1004 => parse_unified(p).ok().map(Event::Battery),
+                0x2202 if p.len() >= 6 => Some(Event::Dpi {
+                    x: u16::from_be_bytes([p[1], p[2]]),
+                    y: u16::from_be_bytes([p[3], p[4]]),
+                    lod: p[5],
+                }),
+                0x8061 if p.len() >= 2 => Some(Event::ReportRate { conn: p[0], bit: p[1] }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+impl std::fmt::Display for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Event::Connection {
+                index,
+                online,
+                wpid,
+                kind,
+                protocol,
+            } => write!(
+                f,
+                "slot {index}: {} wpid={wpid:04x} kind={} protocol={protocol:#04x}",
+                if *online { "connected" } else { "link lost" },
+                kind_name(*kind)
+            ),
+            Event::Disconnected { index } => write!(f, "slot {index}: unpaired/disconnected"),
+            Event::Battery(b) => write!(f, "battery {b}"),
+            Event::Dpi { x, y, lod } => write!(f, "dpi {x} (y {y}, lod {lod})"),
+            Event::ReportRate { conn, bit } => write!(
+                f,
+                "report rate {} Hz ({})",
+                rate_hz(*bit),
+                if *conn == 0 { "wired" } else { "wireless" }
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- report rate
 
 /// 0x8061 ExtendedAdjustableReportRate state.
@@ -597,14 +686,24 @@ pub fn rate_hz(bit: u8) -> u32 {
     125u32 << bit.min(7)
 }
 
-/// f1 GetActualReportRateList -> reply[1] = bitmap; f2 GetReportRate [connType] -> reply[0] =
-/// bit number. [OBS dec_all.c FUN_140cf3c80, FUN_140cf3dd0] connType meaning [UNK]; 0 is sent.
-/// [HW SL2 wired: f1 `00 0F`, f2 [0] `03`]
+/// 0x8061 connection type: 0 = wired, 1 = wireless. [HW SL2: f0 [0] -> caps 0x0F (cable rates),
+/// f0 [1] -> 0x7F (LIGHTSPEED rates); events carry 00 over the cable and 01 over the receiver]
+/// Deciding it from the device index (behind a receiver = wireless) is [INF]; a direct
+/// Bluetooth device would need another rule.
+pub fn conn_type(dev: u8) -> u8 {
+    if dev == DIRECT { 0 } else { 1 }
+}
+
+/// f1 GetActualReportRateList -> reply[1] = bitmap for the active connection;
+/// f2 GetReportRate [connType] -> reply[0] = bit number of that connection's rate.
+/// [OBS dec_all.c FUN_140cf3c80, FUN_140cf3dd0]
+/// [HW SL2: wired f1 `00 0F`, f2 [0] `03`; over the receiver with wireless set to 500 Hz,
+/// f2 [0] -> 03 (the wired setting) but f2 [1] -> 02. So f2 must be asked for the active type.]
 pub fn report_rate(h: &mut Hidpp, dev: u8) -> Result<ReportRate, Error> {
     let index = h.feature(dev, 0x8061)?;
     let l = h.call(dev, index, 1, &[], &[])?;
     need(&l, 2)?;
-    let g = h.call(dev, index, 2, &[0], &[])?;
+    let g = h.call(dev, index, 2, &[conn_type(dev)], &[])?;
     need(&g, 1)?;
     Ok(ReportRate {
         index,
@@ -753,6 +852,75 @@ mod tests {
     }
 
     #[test]
+    fn decodes_events() {
+        let feats = [(6u8, 0x1004u16), (9, 0x2202), (12, 0x8061)];
+        let pad = |b: &[u8]| {
+            let mut v = b.to_vec();
+            v.resize(20, 0);
+            v
+        };
+        // [HW] SL2 wired
+        assert_eq!(
+            decode_event(
+                &pad(&[0x11, 0xFF, 0x09, 0x00, 0x00, 0x06, 0x40, 0x06, 0x40, 0x02]),
+                &feats
+            ),
+            Some(Event::Dpi {
+                x: 1600,
+                y: 1600,
+                lod: 2
+            })
+        );
+        assert_eq!(
+            decode_event(&pad(&[0x11, 0xFF, 0x0C, 0x00, 0x00, 0x02]), &feats),
+            Some(Event::ReportRate { conn: 0, bit: 2 })
+        );
+        // [HW] over the receiver
+        assert_eq!(
+            decode_event(&pad(&[0x11, 0x01, 0x0C, 0x00, 0x01, 0x03]), &feats),
+            Some(Event::ReportRate { conn: 1, bit: 3 })
+        );
+        // 0x1004 event, same layout as f1 [OBS]; bytes from the [HW] f1 reply
+        assert_eq!(
+            decode_event(&pad(&[0x11, 0x01, 0x06, 0x00, 0x1C, 0x02, 0x01, 0x01]), &feats),
+            Some(Event::Battery(Battery::Unified {
+                soc: 28,
+                level: 2,
+                charging: 1,
+                external: 1
+            }))
+        );
+        // our own reply (swid 3) and another program's reply (swid 0x0A) are not events
+        assert_eq!(decode_event(&pad(&[0x11, 0xFF, 0x0C, 0x23, 0x03]), &feats), None);
+        assert_eq!(decode_event(&pad(&[0x11, 0xFF, 0x0C, 0x2A, 0x03]), &feats), None);
+        // fn != 0 with swid 0 is not an event we know
+        assert_eq!(decode_event(&pad(&[0x11, 0xFF, 0x0C, 0x10, 0x03]), &feats), None);
+        // unknown feature index
+        assert_eq!(decode_event(&pad(&[0x11, 0xFF, 0x05, 0x00, 0x03]), &feats), None);
+        // receiver 0x41 [OBS §9.8]: index 1, link up, type 2, wpid 0x40A9 little-endian
+        assert_eq!(
+            decode_event(&[0x10, 0x01, 0x41, 0x04, 0x02, 0xA9, 0x40], &[]),
+            Some(Event::Connection {
+                index: 1,
+                online: true,
+                wpid: 0x40A9,
+                kind: 2,
+                protocol: 4
+            })
+        );
+        // bit 6 = link not established
+        assert!(matches!(
+            decode_event(&[0x10, 0x01, 0x41, 0x04, 0x42, 0xA9, 0x40], &[]),
+            Some(Event::Connection { online: false, .. })
+        ));
+        assert_eq!(
+            decode_event(&[0x10, 0x01, 0x40, 0x02, 0, 0, 0], &[]),
+            Some(Event::Disconnected { index: 1 })
+        );
+        assert_eq!(decode_event(&[0x10, 0x01, 0x41, 0x04], &[]), None); // too short
+    }
+
+    #[test]
     fn report_rate_bits() {
         // [HW] wired SL2: supported 0x0F, current bit 3
         let r = ReportRate {
@@ -768,6 +936,8 @@ mod tests {
         // f3 request: [bit]
         let m = hidpp::build20(DIRECT, 12, 3, 3, &[2]).unwrap();
         assert_eq!(m, [0x10, 0xFF, 0x0C, 0x33, 0x02, 0x00, 0x00]);
+        // f2 asks for the active connection type
+        assert_eq!((conn_type(DIRECT), conn_type(1)), (0, 1));
     }
 
     #[test]

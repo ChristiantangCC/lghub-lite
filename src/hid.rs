@@ -5,8 +5,10 @@ use std::io;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
-    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+    CM_NOTIFY_ACTION, CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
+    CM_Register_Notification, CM_Unregister_Notification, CR_SUCCESS, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+    HCMNOTIFICATION, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList,
+    SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
 };
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
     HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid,
@@ -20,7 +22,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject};
 use windows_sys::core::GUID;
 
 /// One HID top-level collection (Windows exposes each as its own device path).
@@ -299,23 +301,121 @@ impl Drop for Handle {
     }
 }
 
+pub enum Wake {
+    /// Input report from hs[i].
+    Report(usize, Vec<u8>),
+    /// Reading hs[i] failed, e.g. the device was unplugged (ERROR_DEVICE_NOT_CONNECTED).
+    Failed(usize, io::Error),
+    /// The extra handle was signalled.
+    Extra,
+    Timeout,
+}
+
+/// Wait up to `timeout_ms` (`INFINITE` allowed) for an input report on any of `hs`, or for
+/// `extra` to be signalled. Never busy-waits: one WaitForMultipleObjects call.
+pub fn wait_any(hs: &mut [&mut Handle], extra: Option<&Notifier>, timeout_ms: u32) -> Wake {
+    for (i, h) in hs.iter_mut().enumerate() {
+        match h.arm() {
+            Ok(Some(r)) => return Wake::Report(i, r),
+            Ok(None) => {}
+            Err(e) => return Wake::Failed(i, e),
+        }
+    }
+    let mut evs: Vec<HANDLE> = hs.iter().map(|h| h.ev.0).collect();
+    if let Some(n) = extra {
+        evs.push(n.ev.0);
+    }
+    // SAFETY: all events are valid for the duration of the wait. At most 64 handles
+    // (MAXIMUM_WAIT_OBJECTS); callers open only a few devices.
+    let w = unsafe { WaitForMultipleObjects(evs.len() as u32, evs.as_ptr(), 0, timeout_ms) };
+    if w == WAIT_TIMEOUT {
+        return Wake::Timeout;
+    }
+    let i = w.wrapping_sub(WAIT_OBJECT_0) as usize;
+    if i == hs.len() && extra.is_some() {
+        return Wake::Extra;
+    }
+    if i >= hs.len() {
+        return Wake::Failed(0, io::Error::last_os_error());
+    }
+    match hs[i].finish() {
+        Ok(r) => Wake::Report(i, r),
+        Err(e) => Wake::Failed(i, e),
+    }
+}
+
 /// Wait up to `timeout_ms` for an input report on any of `hs`.
 /// Returns Ok(None) on timeout, else (index into hs, report bytes).
 pub fn read_any(hs: &mut [&mut Handle], timeout_ms: u32) -> io::Result<Option<(usize, Vec<u8>)>> {
-    for (i, h) in hs.iter_mut().enumerate() {
-        if let Some(r) = h.arm()? {
-            return Ok(Some((i, r)));
+    match wait_any(hs, None, timeout_ms) {
+        Wake::Report(i, r) => Ok(Some((i, r))),
+        Wake::Failed(_, e) => Err(e),
+        Wake::Extra | Wake::Timeout => Ok(None),
+    }
+}
+
+/// HID interface arrival/removal notifications via CM_Register_Notification. Windows calls
+/// `on_change` on a thread-pool thread; it only signals an auto-reset event that the main
+/// thread waits on, so no window, message loop or own thread is needed.
+pub struct Notifier {
+    // Field order matters: the registration is dropped (unregistered) before the event closes.
+    _reg: Registration,
+    ev: OwnedHandle,
+}
+
+struct Registration(HCMNOTIFICATION);
+impl Drop for Registration {
+    fn drop(&mut self) {
+        // SAFETY: registered handle; CM_Unregister_Notification waits for running callbacks.
+        unsafe { CM_Unregister_Notification(self.0) };
+    }
+}
+
+unsafe extern "system" fn on_change(
+    _h: HCMNOTIFICATION,
+    context: *const c_void,
+    _action: CM_NOTIFY_ACTION,
+    _data: *const CM_NOTIFY_EVENT_DATA,
+    _size: u32,
+) -> u32 {
+    // SAFETY: context is the event handle owned by Notifier, valid until unregistration.
+    unsafe { SetEvent(context as HANDLE) };
+    0 // ERROR_SUCCESS
+}
+
+impl Notifier {
+    /// Notify on any HID device interface arriving or being removed.
+    pub fn hid() -> io::Result<Notifier> {
+        // Auto-reset, so one wake-up consumes the signal.
+        // SAFETY: no attributes, no name.
+        let e = unsafe { CreateEventW(null(), 0, 0, null()) };
+        if e.is_null() {
+            return Err(io::Error::last_os_error());
         }
+        let ev = OwnedHandle(e);
+        let mut f: CM_NOTIFY_FILTER = unsafe { std::mem::zeroed() };
+        f.cbSize = std::mem::size_of::<CM_NOTIFY_FILTER>() as u32;
+        f.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE;
+        // SAFETY: out-pointer is valid; union field written is the one FilterType selects.
+        unsafe { HidD_GetHidGuid(&mut f.u.DeviceInterface.ClassGuid) };
+        let mut h: HCMNOTIFICATION = null_mut();
+        // SAFETY: filter is valid for the call; context (the event) outlives the registration.
+        let cr = unsafe { CM_Register_Notification(&f, ev.0 as *const c_void, Some(on_change), &mut h) };
+        if cr != CR_SUCCESS {
+            return Err(io::Error::other(format!(
+                "CM_Register_Notification failed: CONFIGRET {cr}"
+            )));
+        }
+        Ok(Notifier {
+            _reg: Registration(h),
+            ev,
+        })
     }
-    let evs: Vec<HANDLE> = hs.iter().map(|h| h.ev.0).collect();
-    // SAFETY: all events are valid for the duration of the wait.
-    let w = unsafe { WaitForMultipleObjects(evs.len() as u32, evs.as_ptr(), 0, timeout_ms) };
-    if w == WAIT_TIMEOUT {
-        return Ok(None);
+
+    /// Wait up to `ms` for further notifications, consuming them (used to let a burst of
+    /// interface arrivals from one plug-in settle before re-enumerating).
+    pub fn settle(&self, ms: u32) {
+        // SAFETY: valid event handle.
+        while unsafe { WaitForSingleObject(self.ev.0, ms) } == WAIT_OBJECT_0 {}
     }
-    let i = w.wrapping_sub(WAIT_OBJECT_0) as usize;
-    if i >= hs.len() {
-        return Err(io::Error::last_os_error());
-    }
-    hs[i].finish().map(|r| Some((i, r)))
 }

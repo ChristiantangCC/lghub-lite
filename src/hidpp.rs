@@ -1,6 +1,7 @@
 //! HID++ framing, request/response matching, error decoding and feature lookup.
 //! Evidence pointers are in NOTES.md; section numbers refer to ../protocol.md.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -177,12 +178,20 @@ pub fn hex(b: &[u8]) -> String {
     s
 }
 
+/// Reports that arrived during a transaction but did not answer it (events, other software's
+/// traffic) are kept for `queued`, up to this many; older ones are dropped.
+const QUEUE_MAX: usize = 64;
+
 /// A HID++ endpoint: the short and/or long collection of one physical interface.
 pub struct Hidpp {
     cols: Vec<Handle>,
+    queue: VecDeque<Vec<u8>>,
     pub swid: u8,
     pub trace: bool,
     pub timeout: Duration,
+    /// Extra attempts after a timeout or Busy. G HUB uses 9 [OBS §9.6]; 2 is enough to ride
+    /// out the SL2's wake-up from sleep [HW: first request after idle timed out at 1 s].
+    pub retries: u8,
 }
 
 impl Hidpp {
@@ -196,10 +205,22 @@ impl Hidpp {
         cols.sort_by_key(|h| h.out_len);
         Ok(Hidpp {
             cols,
+            queue: VecDeque::new(),
             swid,
             trace,
             timeout: Duration::from_millis(2000),
+            retries: 2,
         })
+    }
+
+    /// The open collections, for waiting on several devices at once (`hid::wait_any`).
+    pub fn handles(&mut self) -> std::slice::IterMut<'_, Handle> {
+        self.cols.iter_mut()
+    }
+
+    /// Pop a report queued during an earlier transaction.
+    pub fn queued(&mut self) -> Option<Vec<u8>> {
+        self.queue.pop_front()
     }
 
     /// Write `msg` to the first collection whose output report fits it, zero-padded and
@@ -230,9 +251,25 @@ impl Hidpp {
         Ok(r.map(|(_, b)| b))
     }
 
-    /// Send `msg` and wait for its reply. Unrelated reports (events, other programs'
-    /// traffic) are traced and skipped. Returns the full reply report.
+    /// Send `msg` and wait for its reply, retrying on timeout or Busy with a growing pause.
+    /// Resending is safe for everything this tool sends: reads, and writes of absolute values.
+    /// G HUB's backoff is `rand()%500 + (10 << attempt)` ms [OBS §9.6]; we use a fixed
+    /// 100 ms + (10 << attempt) ms [INF] to avoid needing an RNG.
     pub fn transact(&mut self, msg: &[u8], extra: &[usize]) -> Result<Vec<u8>, Error> {
+        let mut attempt = 0;
+        loop {
+            match self.transact_once(msg, extra) {
+                Err(e @ (Error::Timeout | Error::Hpp20(8))) if attempt < self.retries => {
+                    attempt += 1;
+                    crate::verbose(format_args!("{e}; retry {attempt}/{}", self.retries));
+                    std::thread::sleep(Duration::from_millis(100 + (10 << attempt)));
+                }
+                r => return r,
+            }
+        }
+    }
+
+    fn transact_once(&mut self, msg: &[u8], extra: &[usize]) -> Result<Vec<u8>, Error> {
         self.write(msg)?;
         let deadline = Instant::now() + self.timeout;
         loop {
@@ -251,7 +288,12 @@ impl Hidpp {
                 Match::Reply => return Ok(r),
                 Match::Err10(c) => return Err(Error::Hpp10(c)),
                 Match::Err20(c) => return Err(Error::Hpp20(c)),
-                Match::No => {}
+                Match::No => {
+                    if self.queue.len() == QUEUE_MAX {
+                        self.queue.pop_front();
+                    }
+                    self.queue.push_back(r);
+                }
             }
         }
     }

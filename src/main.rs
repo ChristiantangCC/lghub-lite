@@ -1,6 +1,7 @@
 mod device;
 mod hid;
 mod hidpp;
+mod watch;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -22,6 +23,7 @@ const USAGE: &str = "\
 usage: lghub-lite [--trace] [--verbose] [--swid N] <command>
 
   devices                  list HID++ devices, including those behind receivers
+  watch                    print plug/unplug, receiver connect/disconnect and setting events
   info <dev>               identity, firmware and supported features
   battery <dev>            battery state
   dpi <dev> [value]        read DPI, or set it and read it back
@@ -65,6 +67,7 @@ fn main() {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let r = match a.as_slice() {
         ["devices"] => devices(&opts),
+        ["watch"] => watch::run(opts.swid, opts.trace),
         ["collections"] => collections(),
         ["info", d] => with_dev(&opts, d, info),
         ["battery", d] => with_dev(&opts, d, |h, dev| {
