@@ -34,6 +34,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `profiles <dev>`, `dump <dev> <file>` | ✅ read-only 0x8100 onboard memory: info, active profile, user/factory directories, per-sector CRC status, full text backup (atomic write). Nothing is written to the device. SL2 backup saved at `%APPDATA%\lghub-lite\onboard-backup-40a9-2026-10-15.txt` |
 | `autostart [on\|off]` | ✅ per-user login entry (HKCU `Run` value `lghub-lite`) for `lghub-lite-bg.exe`; `on` also starts it, `off` also stops it [HW: on → running, second copy exits, log written; off → entry removed, process ended] |
 | `lghub-lite-bg.exe` | ✅ windowless `watch` (single instance via the `Local\lghub-lite-bg` mutex), output with timestamps in `watch.log` next to the preset file, moved to `watch.log.old` at start-up once over 1 MB |
+| `lghub-lite-gui.exe` | ✅ (Windows) egui window + tray, in the separate `gui/` package. [HW]: lists the SL2 and headset with battery (headset bar 73 %); close hides to the tray; hidden idle 0 ms CPU over 20 s; a second launch re-shows the window and exits. Clicking through DPI/rate/mode/preset in the window still needs a human test (TEST REQUEST 10); the same `Monitor::exec` code is hardware-verified via the CLI |
 | sidetone | ❌ removed: 0x8300 level reads and writes back, but a human heard no effect at 50 (2026-10-15). Facts are kept in §2 Headset |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
@@ -43,7 +44,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 ## 2. Protocol facts used by the code
 
 ### Architecture
-One library plus two thin binaries; no traits, no async:
+A Cargo workspace: the core package (one library plus two thin binaries; no traits, no async) and a separate `gui/` package, so the core's dependency tree stays `windows-sys` only:
 - `src/lib.rs`: module list, `verbose`, the Logitech VID.
 - `src/main.rs`: the `lghub-lite` CLI (argument parsing and output).
 - `src/bin/bg.rs`: `lghub-lite-bg`, the windowless watcher. Built with `windows_subsystem = "windows"`; routes stdout/stderr into the log with `SetStdHandle` (std looks the handle up on every write).
@@ -54,7 +55,14 @@ One library plus two thin binaries; no traits, no async:
   - `Notifier` wraps `CM_Register_Notification` for HID interface arrival/removal.
 - `src/hidpp.rs`: framing, swid, reply matching, error decoding, retries, queue of unsolicited reports, Root/ping, feature names.
 - `src/device.rs`: interface grouping, receiver slots, identity, battery, DPI, report rate, onboard mode, event decoding.
-- `src/watch.rs`: the `watch` loop; applies presets on every attach.
+- `src/watch.rs`: `Monitor` (open, sync, `next` → `Vec<Update>`, `exec(sel, Cmd)` → `Snapshot`) shared by the CLI's `watch` (prints each `Update` via `Display`, lines unchanged and tested) and the GUI. Applies presets on every attach unless switched off (the GUI switches it off while `lghub-lite-bg` runs).
+- `gui/src/main.rs`: `lghub-lite-gui`.
+  - eframe 0.37 (glow renderer) + tray-icon 0.26.
+  - **Two threads:** the UI thread, and one worker that owns the `Monitor` and does all HID I/O, because requests can block for seconds while a wireless device wakes. Commands go over an `mpsc` channel plus `hid::Waker`; updates come back over a channel plus `request_repaint`.
+  - **Tray:** eframe's `App::logic` also runs while the window is hidden whenever a repaint is requested, so tray clicks restore the window without Win32 workarounds.
+  - **Single instance:** mutex `Local\lghub-lite-gui`. A second launch shows the first window via `FindWindowW` + `ShowWindow` and exits.
+  - **Autostart:** writes the same HKCU `Run` value as the CLI (`"…\lghub-lite-gui.exe" --tray`), so only one of the two watchers starts at login.
+- `src/device.rs` verified writes: `set_dpi_verified`, `set_rate_verified`, `set_mode_verified`, `explain_refusal`, shared by the CLI and GUI.
 - `src/config.rs`: preset file parse/format, apply, and `write_atomic` (write `<file>.tmp`, then rename), shared by presets and dumps.
 - `src/profiles.rs`: onboard memory read path (0x8100 f0/f4/f5/f10), CRC-CCITT, directory parsing, dump format.
 - `src/audio.rs`: headset features 0x1F20 (battery voltage, user-supplied curve in fixed-point integers) and 0x8310 (EQ read).
@@ -287,7 +295,7 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `de
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
 | 2026-10-15 | headset 0aba | USB (own dongle) | human copied the power-model XML into %APPDATA%\lghub-lite; `battery 0aba` | ✅ percentage shown (human-confirmed); our test copy: 78 % / 18.8 h vs G HUB 78 % / 18.7 h; watch printed the 78 → 77 % drop from its 5-min read |
 | 2026-10-15 | headset 0aba | USB (own dongle) | 0x1F20 battery, 0x8300 sidetone read + write 30 → read-back → 0, 0x8310 EQ read + write attempt | ✅ 3919 mV vs G HUB 80 %; sidetone write/read-back ok; EQ read ok; EQ write refused (InvalidArgument, unchanged) → write removed |
-| — | — | — | `cargo test`: 36 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
+| — | — | — | `cargo test --workspace`: 38 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
 All tests ran with G HUB running. G HUB does not manage the SL2.
 
@@ -305,6 +313,15 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 - Expected: about 125 Hz, then about 1000 Hz. This would turn the [PUB] bit → Hz mapping into [HW].
 
 TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on 2026-10-15; see §5.
+
+**TEST REQUEST 10: the app.**
+- Run `lghub-lite-gui.exe`, select **PRO X 2**, and check that mode, DPI, report rate and battery show.
+- Click **Use settings from this PC**: mode becomes Host.
+- Set DPI 1600, then **Apply**: "now 1600", and the cursor is faster. Pick a different report rate.
+- **Save current** as preset; switch the mouse off and on: the log shows "preset applied".
+- Restore: DPI 800, **Back to onboard profile**, **Clear** the preset.
+- Close the window: the tray icon remains and its tooltip shows battery. Left-click it: the window returns. Tray menu **Quit**: the app exits.
+- Tick **Start at login**, check that `lghub-lite autostart` shows the GUI entry, then untick it.
 
 **TEST REQUEST 7: headset sidetone is audible.** (Command removed.) ❌ Failed on 2026-10-15: set 50 (read-back 50), human heard nothing; restored 0. Possible causes [INF]: a different value scale; or the effective sidetone being the USB-audio mixer control that G HUB's audio side uses rather than HID++ 0x8300. Open. G HUB can stay open.
 - Commands: put the headset on, then `lghub-lite sidetone 0aba 50`, speak, then `lghub-lite sidetone 0aba 0`.
@@ -354,12 +371,13 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` | **284,160 B** |
-| `lghub-lite-bg.exe` | **225,280 B** |
-| Release zip (both exes + README + LICENSE) | 269,366 B |
-| Crates in tree | 3 (`lghub-lite`, `windows-sys`, `windows-link`) |
+| `lghub-lite.exe` | **288,768 B** (Monitor refactor and verified-write helpers: +4.6 KB) |
+| `lghub-lite-bg.exe` | **229,376 B** |
+| `lghub-lite-gui.exe` | **4,397,056 B** (eframe/glow + tray-icon) |
+| Crates | core: 3 (`lghub-lite`, `windows-sys`, `windows-link`), unchanged; GUI package: 122 |
 | `devices` wall time | median 115 ms (10 runs; headset + receiver, includes HID++ round trips) |
-| `watch` idle | **0 ms CPU** over 30 s, 1 thread between events, ~5.6 MB working set; one 0x1F20 read per 5 min when a voltage-only headset is present |
+| `watch` / `lghub-lite-bg` idle | **0 ms CPU** over 30 s, 1 thread between events, ~5.6 MB working set; one 0x1F20 read per 5 min when a voltage-only headset is present |
+| GUI idle | **0 ms CPU** over 20 s, both shown and hidden; 7 threads; ~181 MB working set / 211 MB private. Most of that is the OpenGL driver context, not our code; the README points users who want a minimal footprint to `lghub-lite-bg` |
 
 **Size history**, with the cause of each step:
 - 184,832 B at the MVP (opt-level 3 was 201,728 B, so we keep "s");

@@ -171,6 +171,8 @@ struct Live {
     h: Hidpp,
     devs: Vec<Dev>,
     presets: PathBuf,
+    /// Apply presets on attach (off when another watcher already does it).
+    apply_presets: bool,
 }
 
 impl Live {
@@ -190,6 +192,7 @@ pub struct Monitor {
     trace: bool,
     presets: PathBuf,
     next_poll: Instant,
+    apply_presets: bool,
 }
 
 impl Monitor {
@@ -203,10 +206,20 @@ impl Monitor {
             trace,
             presets: presets.to_path_buf(),
             next_poll: Instant::now() + BATTERY_POLL,
+            apply_presets: true,
         };
         let mut out = Vec::new();
         m.sync(&mut out)?;
         Ok((m, out))
+    }
+
+    /// Turn automatic preset application on attach on or off (on by default). The GUI turns it
+    /// off while `lghub-lite-bg` is running, so only one process applies presets.
+    pub fn set_apply_presets(&mut self, on: bool) {
+        self.apply_presets = on;
+        for l in self.live.iter_mut() {
+            l.apply_presets = on;
+        }
     }
 
     /// Selectors of all attached (online) devices.
@@ -312,6 +325,7 @@ impl Monitor {
                         h,
                         devs: Vec::new(),
                         presets: self.presets.clone(),
+                        apply_presets: self.apply_presets,
                     };
                     describe(&mut l, out);
                     self.live.push(l);
@@ -558,7 +572,9 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
     });
     l.devs.retain(|d| d.index != index);
     l.devs.push(dev);
-    apply_preset(l, index, out);
+    if l.apply_presets {
+        apply_preset(l, index, out);
+    }
 }
 
 /// Apply this device's preset, if any. Errors are reported, never fatal: `watch` keeps running.

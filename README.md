@@ -1,14 +1,15 @@
 # lghub-lite
 
-A tiny Windows command-line tool for Logitech HID++ mice and headsets: DPI, report rate,
-battery, presets applied on connect, and an event-driven background watcher. Around 300 KB,
-no installer, no services, no network access, no telemetry, and **no Logitech G HUB required**.
+Lightweight Windows tools for Logitech HID++ mice and headsets: DPI, report rate, battery,
+presets applied on connect. A small desktop app with a tray icon, plus a ~300 KB command-line
+tool and background watcher. No installer, no services, no network access, no telemetry, and
+**no Logitech G HUB required**.
 
 > **Not affiliated with or endorsed by Logitech.** "Logitech", "G HUB", "LIGHTSPEED" and
 > product names are trademarks of their owners and are used here only to describe
 > compatibility. Use at your own risk; see [LICENSE](LICENSE).
 
-**Status: 0.1 beta.** It works on the devices in the table below. Other HID++ devices will
+**Status: 0.2 beta.** It works on the devices in the table below. Other HID++ devices will
 usually be listed and readable, but writes are only verified where marked.
 
 ## Tested devices
@@ -25,7 +26,7 @@ Have a different device? Run `lghub-lite devices` and `lghub-lite info <dev>` an
 
 1. Download `lghub-lite-<version>-windows-x64.zip` from [Releases](../../releases) and unzip
    it anywhere, for example `C:\Tools\lghub-lite\`.
-2. Open PowerShell or Command Prompt in that folder.
+2. Double-click `lghub-lite-gui.exe`, or open PowerShell in that folder for the command-line tool.
 
 The executables are not code-signed, so Windows SmartScreen may warn the first time; choose
 "More info" → "Run anyway", or build from source (below).
@@ -34,7 +35,30 @@ If G HUB is installed it can keep running, but it may override settings you chan
 For predictable results, quit G HUB (tray icon → Quit) and disable it at login (Task
 Manager → Startup apps).
 
-## Quick start
+## The app
+
+Double-click **`lghub-lite-gui.exe`**. It lists your devices on the left; select one to see:
+
+- **Battery** as a bar, with time left for headsets that report a voltage (see
+  [Headset battery percentage](#headset-battery-percentage)).
+- **Mode**: "Onboard profile" means the mouse uses settings stored inside it. Click
+  **Use settings from this PC** to change DPI and report rate from here, or
+  **Back to onboard profile** to undo.
+- **DPI** (type a value, **Apply**) and **Report rate** (pick from the list). Every change is
+  read back from the device.
+- **Preset → Save current**: apply these settings automatically whenever the device connects or
+  wakes up.
+- **Event log**: plug/unplug, sleep/wake and setting changes, with timestamps.
+
+Closing the window keeps it running in the **tray** (the tooltip shows battery levels); use
+the tray menu's **Quit** to exit. Tick **Start at login (in the tray)** to have presets applied
+from login on. That replaces the command-line `autostart` entry, so only one of them runs.
+
+The app is about 4.4 MB and uses roughly 180 MB of memory, mostly the graphics driver (it
+draws with OpenGL). It uses no CPU while idle. If you want the smallest footprint, use the
+command-line tool and `lghub-lite autostart on` (about 5 MB of memory) instead.
+
+## Command line: quick start
 
 ```text
 lghub-lite devices                 list devices, including those behind a receiver
@@ -141,15 +165,20 @@ folder).
 
 ## Build from source
 
-Requires Rust 1.88 or newer (MSVC toolchain).
+Requires the Rust MSVC toolchain.
 
 ```text
-cargo build --release
+cargo build --release --workspace
 ```
 
-The binaries are `target\release\lghub-lite.exe` and `target\release\lghub-lite-bg.exe`. The only
-dependency is [`windows-sys`](https://crates.io/crates/windows-sys) (raw Windows API bindings).
-Tests run without hardware: `cargo test`.
+This builds `lghub-lite.exe` (CLI), `lghub-lite-bg.exe` (background watcher) and
+`lghub-lite-gui.exe` (app) in `target\release\`.
+- The CLI and watcher need Rust 1.88+ and depend only on
+  [`windows-sys`](https://crates.io/crates/windows-sys) (raw Windows API bindings).
+- The app is a separate package in `gui/`. It uses [egui](https://github.com/emilk/egui) and
+  [tray-icon](https://crates.io/crates/tray-icon) and needs Rust 1.95+.
+
+Tests run without hardware: `cargo test --workspace`.
 
 ## How it works
 

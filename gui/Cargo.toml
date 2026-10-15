@@ -1,0 +1,24 @@
+[package]
+name = "lghub-lite-gui"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95" # eframe 0.37
+description = "Window + tray front end for lghub-lite. Not affiliated with or endorsed by Logitech."
+license = "MIT"
+repository = "https://github.com/Skyttehehe/lghub-lite"
+publish = false
+
+[[bin]]
+name = "lghub-lite-gui"
+path = "src/main.rs"
+
+[dependencies]
+lghub-lite = { path = ".." }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+tray-icon = "0.26"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",       # single-instance mutex
+    "Win32_UI_WindowsAndMessaging", # show/hide the window from the tray
+] }

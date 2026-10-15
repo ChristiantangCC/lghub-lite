@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, gui]
   pull_request:
 
 permissions:
@@ -16,18 +16,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo build --release
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release --workspace
       - name: Binary sizes
         shell: pwsh
         run: Get-ChildItem target\release\lghub-lite*.exe | Format-Table Name, Length
 
   msrv:
-    # rust-version in Cargo.toml must really build
+    # The core's rust-version (CLI + background watcher) must really build.
+    # The GUI follows eframe's own minimum (see gui/Cargo.toml).
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
-      - run: cargo build
+      - run: cargo build -p lghub-lite
