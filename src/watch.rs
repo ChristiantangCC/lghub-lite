@@ -137,7 +137,7 @@ pub enum Cmd {
 }
 
 /// Everything the GUI shows for one device, read fresh from the hardware.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub sel: String,
     pub name: String,

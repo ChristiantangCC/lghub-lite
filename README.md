@@ -56,7 +56,7 @@ Double-click **`lghub-lite-gui.exe`**. It opens a small battery widget:
   saved as the mouse's preset, so it is applied again whenever the mouse connects; **Use
   onboard** goes back and removes the preset. For a headset: the battery curve and its
   recording.
-- **Skins** opens the skin manager: five built-in looks, colour editing (edits are saved as your
+- **Skins** (click the **lghub-lite** title, or **Skins…** in the tray menu) opens the skin manager: five built-in looks, colour editing (edits are saved as your
   own skin), and **Load skin file…** / **Export current** to share skins as small `.json`
   files. You can also drop a skin file on the window. Custom skins live in
   `%APPDATA%\lghub-lite\skins\`.
@@ -64,7 +64,7 @@ Double-click **`lghub-lite-gui.exe`**. It opens a small battery widget:
 The round buttons in the title bar minimise the widget or hide it to the **tray** (the tooltip
 shows battery levels); drag the title bar to move it. Use the tray menu's **Quit** to exit.
 
-The app is about 4.6 MB and uses roughly 150 MB of memory, mostly the graphics driver (it
+The app is about 4.9 MB (including its fonts) and uses roughly 150 MB of memory, mostly the graphics driver (it
 draws with OpenGL). It uses no CPU while idle. If you want the smallest footprint, use the
 command-line tool and `lghub-lite autostart on` (about 5 MB of memory) instead.
 
@@ -221,3 +221,8 @@ devices. This repository contains no Logitech code or data.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+The app bundles these fonts under the SIL Open Font License 1.1 (licence texts in
+[`gui/fonts/`](gui/fonts/) and in the release zip): IBM Plex Sans and IBM Plex Mono
+(trimmed to the characters the app uses and renamed "LL Sans" / "LL Mono", as the licence
+requires for modified copies of the Reserved Font Name "Plex"), Space Grotesk and VT323.

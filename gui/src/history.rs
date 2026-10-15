@@ -41,8 +41,8 @@ impl History {
         }
     }
 
-    #[cfg(test)]
-    fn memory(samples: Vec<(u64, u8)>) -> History {
+    /// A history that is not stored (demo mode, tests).
+    pub fn memory(samples: Vec<(u64, u8)>) -> History {
         History { path: None, samples }
     }
 

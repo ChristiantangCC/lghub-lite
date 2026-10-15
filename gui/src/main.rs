@@ -8,6 +8,8 @@
 //! worker sleeps in the same WaitForMultipleObjects as `lghub-lite watch`.
 #![windows_subsystem = "windows"]
 
+mod demo;
+mod fonts;
 mod history;
 mod skin;
 mod view;
@@ -53,6 +55,8 @@ struct Row {
     history: History,
     /// The low-battery alert fired and the level has not risen above the threshold since.
     alerted: bool,
+    /// Demo mode: fixed (time left, drain, status) texts.
+    demo: Option<[&'static str; 3]>,
 }
 
 impl Row {
@@ -67,6 +71,7 @@ impl Row {
 #[derive(Default)]
 struct TrayFlags {
     show: AtomicBool,
+    skins: AtomicBool,
     quit: AtomicBool,
 }
 
@@ -102,6 +107,10 @@ struct App {
     skin_msg: Option<(bool, String)>,
     /// A custom skin was edited; saved once editing pauses.
     skin_dirty: Option<Instant>,
+    /// `--demo`: the design's sample devices, no hardware access.
+    demo: Option<Vec<Snapshot>>,
+    /// Height of the skin manager panel at the last frame.
+    manager_h: f32,
 }
 
 fn main() {
@@ -115,16 +124,17 @@ fn main() {
         .or_else(config::default_path)
         .unwrap_or_else(|| PathBuf::from("presets.txt"));
 
-    if !win::single_instance() {
+    let demo = demo::Options::parse(&args);
+    if demo.is_none() && !win::single_instance() {
         win::focus_existing(TITLE);
         return;
     }
-    let bg_running = win::mutex_exists("Local\\lghub-lite-bg");
+    let bg_running = demo.is_none() && win::mutex_exists("Local\\lghub-lite-bg");
 
     let (w, h, rgba) = icon_rgba(false);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(TITLE)
+            .with_title(if demo.is_some() { "lghub-lite demo" } else { TITLE })
             .with_inner_size([view::WIDGET_W, 420.0])
             .with_resizable(false)
             .with_decorations(false)
@@ -141,18 +151,38 @@ fn main() {
     let _ = eframe::run_native(
         TITLE,
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, cfg, bg_running)))),
+        Box::new(move |cc| {
+            let mut app = App::new(cc, cfg, bg_running, demo.is_some());
+            if let Some(d) = demo {
+                d.apply(&mut app);
+            }
+            Ok(Box::new(app))
+        }),
     );
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, cfg: PathBuf, bg_running: bool) -> App {
+    fn new(cc: &eframe::CreationContext<'_>, cfg: PathBuf, bg_running: bool, demo: bool) -> App {
         let ctx = cc.egui_ctx.clone();
-        let dir = cfg.parent().map(PathBuf::from).unwrap_or_default();
+        fonts::install(&ctx);
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = cc.window_handle()
+                && let RawWindowHandle::Win32(w) = h.as_raw()
+            {
+                win::full_client_area(w.hwnd.get() as _);
+            }
+        }
+        // demo mode keeps its settings and skins away from the real ones
+        let dir = if demo {
+            std::env::temp_dir().join("lghub-lite-demo")
+        } else {
+            cfg.parent().map(PathBuf::from).unwrap_or_default()
+        };
         let (tx, worker_rx) = channel();
         let (worker_tx, rx) = channel();
         let waker = Arc::new(Waker::new().expect("cannot create event"));
-        {
+        if !demo {
             let (waker, ctx, cfg) = (waker.clone(), ctx.clone(), cfg.clone());
             std::thread::spawn(move || worker(cfg, worker_rx, worker_tx, waker, ctx, !bg_running));
         }
@@ -192,6 +222,8 @@ impl App {
             show_skins: false,
             skin_msg: None,
             skin_dirty: None,
+            demo: None,
+            manager_h: 720.0,
         }
     }
 
@@ -228,6 +260,10 @@ impl App {
     }
 
     fn send(&mut self, sel: &str, cmd: Cmd) {
+        if let Some(snaps) = &self.demo {
+            self.snap = snaps.iter().find(|s| s.sel == sel).cloned();
+            return;
+        }
         self.pending += 1;
         let _ = self.tx.send(ToWorker::Exec(sel.to_string(), cmd));
         self.waker.wake();
@@ -296,6 +332,7 @@ impl App {
                             protocol: Some(protocol),
                             history,
                             alerted: false,
+                            demo: None,
                         })
                     }
                 }
@@ -500,6 +537,10 @@ impl eframe::App for App {
             }
         }
 
+        if self.flags.skins.swap(false, Ordering::Relaxed) {
+            self.show_skins = true;
+            self.flags.show.store(true, Ordering::Relaxed);
+        }
         if self.flags.show.swap(false, Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -527,8 +568,9 @@ impl eframe::App for App {
 
 fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
     let open = MenuItem::new("Open", true, None);
+    let skins = MenuItem::new("Skins…", true, None);
     let quit = MenuItem::new("Quit", true, None);
-    let menu = Menu::with_items(&[&open, &quit]).ok()?;
+    let menu = Menu::with_items(&[&open, &skins, &quit]).ok()?;
     let (w, h, rgba) = icon_rgba(false);
     let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
     let tray = TrayIconBuilder::new()
@@ -538,12 +580,14 @@ fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
         .with_icon(icon)
         .build()
         .ok()?;
-    let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
+    let (open_id, skins_id, quit_id) = (open.id().clone(), skins.id().clone(), quit.id().clone());
     {
         let (ctx, flags) = (ctx.clone(), flags.clone());
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
             if e.id == open_id {
                 flags.show.store(true, Ordering::Relaxed);
+            } else if e.id == skins_id {
+                flags.skins.store(true, Ordering::Relaxed);
             } else if e.id == quit_id {
                 flags.quit.store(true, Ordering::Relaxed);
             }
@@ -642,6 +686,38 @@ mod win {
                 ShowWindow(w, SW_SHOW);
                 SetForegroundWindow(w);
             }
+        }
+    }
+
+    /// winit gives borderless windows a 1 px top strip for the system drop shadow, which
+    /// shifts the content down by a pixel and draws a dark line. Take the whole window as
+    /// client area instead (the widget paints its own edge).
+    pub fn full_client_area(hwnd: windows_sys::Win32::Foundation::HWND) {
+        use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+        use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WM_NCCALCSIZE,
+        };
+
+        unsafe extern "system" fn proc(h: HWND, msg: u32, w: WPARAM, l: LPARAM, _: usize, _: usize) -> LRESULT {
+            if msg == WM_NCCALCSIZE && w != 0 {
+                return 0; // client rect = window rect
+            }
+            // SAFETY: forwarding the message unchanged to the next handler.
+            unsafe { DefSubclassProc(h, msg, w, l) }
+        }
+        // SAFETY: hwnd is our live top-level window; the subclass lives as long as it does.
+        unsafe {
+            SetWindowSubclass(hwnd, Some(proc), 1, 0);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            );
         }
     }
 

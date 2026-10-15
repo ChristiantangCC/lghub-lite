@@ -330,7 +330,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 - Restore: DPI 800 and your usual rate, then **Use onboard**: mode is "Onboard profile" and `lghub-lite presets` no longer lists the mouse.
 - Headset, **Settings**: the battery curve line, the recording tooltip on **Build from recording**, and **Open folder** work.
 - **Alert at** + / −: the red line moves on the gauge and the history; the value is kept after a restart.
-- **Skins**: pick each built-in (Amber shows pixel digits); change a colour on a built-in: a "(mine)" skin appears and is selected; **Export current** saves a `.json`; **Load skin file…** that file back; restart: the chosen skin is kept.
+- **Skins** (click the lghub-lite title, or tray menu **Skins…**): pick each built-in (Amber shows pixel digits); change a colour on a built-in: a "(mine)" skin appears and is selected; **Export current** saves a `.json`; **Load skin file…** that file back; restart: the chosen skin is kept.
 - Title bar: drag moves the widget; the left round button minimises; the right one hides it to the tray. Left-click the tray icon: the widget returns. Tray menu **Quit**: the app exits.
 - **Tray** button: `lghub-lite autostart` shows the GUI entry; click again to remove it.
 
@@ -390,7 +390,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 |---|---|
 | `lghub-lite.exe` | **311,296 B** (measured battery curves, recording, `curve` command: +22.5 KB) |
 | `lghub-lite-bg.exe` | **249,856 B** (+20.5 KB, same cause) |
-| `lghub-lite-gui.exe` | **4,564,480 B** (eframe/glow + tray-icon; Battery Tracker v3 widget, skins and history: +167 KB) |
+| `lghub-lite-gui.exe` | **4,889,088 B** (eframe/glow + tray-icon; Battery Tracker v3 widget, skins and history: +167 KB; the design's fonts, trimmed: +325 KB) |
 | Crates | core: 3 (`lghub-lite`, `windows-sys`, `windows-link`), unchanged; GUI package: 122 |
 | `devices` wall time | median 115 ms (10 runs; headset + receiver, includes HID++ round trips) |
 | `watch` / `lghub-lite-bg` idle | **0 ms CPU** over 30 s, 1 thread between events, ~5.6 MB working set; one 0x1F20 read per 5 min when a voltage-only headset is present |

@@ -8,3 +8,5 @@
 LGHUB/
 # Logitech power-model curves are user-supplied (copied from their own G HUB); never commit
 *.xml
+/design-ref/
+/.claude/

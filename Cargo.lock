@@ -1222,6 +1222,7 @@ version = "0.2.0"
 dependencies = [
  "eframe",
  "lghub-lite",
+ "raw-window-handle",
  "tray-icon",
  "windows-sys 0.61.2",
 ]
