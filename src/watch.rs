@@ -10,7 +10,25 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use windows_sys::Win32::Foundation::SYSTEMTIME;
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::INFINITE;
+
+/// Local wall-clock time for log lines, e.g. `2026-10-15 22:31:02`.
+fn now() -> String {
+    let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    // SAFETY: valid out-pointer.
+    unsafe { GetLocalTime(&mut t) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
+}
+
+/// `println!` with a timestamp, so watch output (and the background log) is a history.
+macro_rules! say {
+    ($($t:tt)*) => { println!("{} {}", now(), format_args!($($t)*)) };
+}
 
 use crate::audio::{self, Adc, Curve};
 use crate::config;
@@ -55,9 +73,9 @@ impl Live {
 pub fn run(swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
     let notifier = Notifier::hid().map_err(|e| Error::Io(e.to_string()))?;
     let mut live: Vec<Live> = Vec::new();
-    println!("presets    {}", presets.display());
+    say!("presets    {}", presets.display());
     sync(&mut live, swid, trace, presets)?;
-    println!("watching for device and setting changes (Ctrl+C to stop)");
+    say!("watching for device and setting changes (Ctrl+C to stop)");
     let mut next_poll = Instant::now() + BATTERY_POLL;
     loop {
         // Reports that arrived while a transaction was waiting for its reply.
@@ -101,7 +119,7 @@ pub fn run(swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
             Got::Report(k, r) => handle(&mut live[k], &r, trace),
             Got::Gone(k, e) => {
                 let l = live.remove(k);
-                println!("- {:04x}  {}  removed ({e})", l.pid, l.product);
+                say!("- {:04x}  {}  removed ({e})", l.pid, l.product);
             }
             Got::Pnp => {
                 // One plug-in raises several interface notifications; let them settle, then
@@ -126,7 +144,7 @@ fn sync(live: &mut Vec<Live>, swid: u8, trace: bool, presets: &Path) -> Result<(
     live.retain(|l| {
         let keep = keys.contains(&l.key);
         if !keep {
-            println!("- {:04x}  {}  removed", l.pid, l.product);
+            say!("- {:04x}  {}  removed", l.pid, l.product);
         }
         keep
     });
@@ -147,7 +165,7 @@ fn sync(live: &mut Vec<Live>, swid: u8, trace: bool, presets: &Path) -> Result<(
                 describe(&mut l);
                 live.push(l);
             }
-            Err(e) => println!("! {:04x}  {}  cannot open: {e}", f.pid, f.product),
+            Err(e) => say!("! {:04x}  {}  cannot open: {e}", f.pid, f.product),
         }
     }
     Ok(())
@@ -159,11 +177,11 @@ fn describe(l: &mut Live) {
         Ok(_) => attach(l, DIRECT),
         Err(Error::Hpp10(_)) => {
             // HID++ 1.0 answer to a 2.0 ping: a receiver. [OBS §9.6]
-            println!("+ {:04x}  {}  (receiver)", l.pid, l.product);
+            say!("+ {:04x}  {}  (receiver)", l.pid, l.product);
             // Notification flags (register 0x00) are only read, never written. [OBS §9.8]
             match l.h.read_register(DIRECT, GET_REGISTER, 0x00, [0, 0, 0], &[]) {
-                Ok(p) => println!("  notification flags (reg 0x00): {}", hidpp::hex(&p[..3.min(p.len())])),
-                Err(e) => println!("  notification flags (reg 0x00): {e}"),
+                Ok(p) => say!("  notification flags (reg 0x00): {}", hidpp::hex(&p[..3.min(p.len())])),
+                Err(e) => say!("  notification flags (reg 0x00): {e}"),
             }
             for slot in 0..6u8 {
                 if device::pairing(&mut l.h, slot).is_ok() {
@@ -171,7 +189,7 @@ fn describe(l: &mut Live) {
                 }
             }
         }
-        Err(e) => println!("+ {:04x}  {}  [no HID++ 2.0 answer: {e}]", l.pid, l.product),
+        Err(e) => say!("+ {:04x}  {}  [no HID++ 2.0 answer: {e}]", l.pid, l.product),
     }
 }
 
@@ -182,11 +200,11 @@ fn attach(l: &mut Live, index: u8) {
         Ok(v) => v,
         // [HW] the receiver answers 0x8F code 0x08 at once for a paired device whose link is down.
         Err(Error::Hpp10(0x08)) => {
-            println!("  {sel:<8} offline (paired, not connected)");
+            say!("  {sel:<8} offline (paired, not connected)");
             return;
         }
         Err(e) => {
-            println!("  {sel:<8} offline ({e})");
+            say!("  {sel:<8} offline ({e})");
             return;
         }
     };
@@ -224,7 +242,7 @@ fn attach(l: &mut Live, index: u8) {
             .map(|b| format!("  battery {b}"))
             .unwrap_or_default()
     };
-    println!("+ {sel:<8} {name}  (HID++ {maj}.{min}){battery}");
+    say!("+ {sel:<8} {name}  (HID++ {maj}.{min}){battery}");
     l.devs.retain(|d| d.index != index);
     l.devs.push(dev);
     apply_preset(l, index);
@@ -236,7 +254,7 @@ fn apply_preset(l: &mut Live, index: u8) {
     let list = match config::load(&l.presets) {
         Ok(v) => v,
         Err(e) => {
-            println!("  {sel:<8} presets not loaded: {e}");
+            say!("  {sel:<8} presets not loaded: {e}");
             return;
         }
     };
@@ -246,7 +264,7 @@ fn apply_preset(l: &mut Live, index: u8) {
     let model = match device::model_id(&mut l.h, index) {
         Ok(m) => m,
         Err(e) => {
-            println!("  {sel:<8} model ID unknown, preset not applied: {e}");
+            say!("  {sel:<8} model ID unknown, preset not applied: {e}");
             return;
         }
     };
@@ -254,8 +272,8 @@ fn apply_preset(l: &mut Live, index: u8) {
         return;
     };
     match config::apply(&mut l.h, index, p) {
-        Ok(s) => println!("  {sel:<8} preset applied: {s}"),
-        Err(e) => println!("  {sel:<8} preset failed: {e}"),
+        Ok(s) => say!("  {sel:<8} preset applied: {s}"),
+        Err(e) => say!("  {sel:<8} preset failed: {e}"),
     }
 }
 
@@ -277,15 +295,15 @@ fn handle(l: &mut Live, r: &[u8], trace: bool) {
         Event::Connection {
             index, online: true, ..
         } => {
-            println!("  {:<8} {ev}", l.sel(index));
+            say!("  {:<8} {ev}", l.sel(index));
             attach(l, index);
         }
         Event::Disconnected { index } => {
-            println!("  {:<8} {ev}", l.sel(index));
+            say!("  {:<8} {ev}", l.sel(index));
             l.devs.retain(|d| d.index != index);
         }
         Event::Voltage { mv, flags } => report_voltage(l, r[1], &Adc { mv, flags }),
-        _ => println!("  {:<8} {ev}", l.sel(r[1])),
+        _ => say!("  {:<8} {ev}", l.sel(r[1])),
     }
 }
 
@@ -306,7 +324,7 @@ fn report_voltage(l: &mut Live, index: u8, a: &Adc) {
     let key = battery_key(a, d.curve.as_ref());
     if key != d.last_battery {
         d.last_battery = key;
-        println!("  {sel:<8} battery {}", audio::voltage_text(a, d.curve.as_ref()));
+        say!("  {sel:<8} battery {}", audio::voltage_text(a, d.curve.as_ref()));
     }
 }
 

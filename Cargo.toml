@@ -2,9 +2,37 @@
 name = "lghub-lite"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Tiny Windows CLI for Logitech HID++ mice and headsets: DPI, report rate, battery, presets. Not affiliated with or endorsed by Logitech."
+license = "MIT"
+repository = "https://github.com/Skyttehehe/simpletechGhub"
+readme = "README.md"
+keywords = ["logitech", "hidpp", "mouse", "dpi", "windows"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[[bin]]
+name = "lghub-lite"
+path = "src/main.rs"
+
+# Windowless `watch` for login autostart; logs to %APPDATA%\lghub-lite\watch.log.
+[[bin]]
+name = "lghub-lite-bg"
+path = "src/bin/bg.rs"
 
 [dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Devices_HumanInterfaceDevice", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_System_Console",           # SetStdHandle: background log file
+    "Win32_System_Registry",          # autostart Run entry
+    "Win32_System_SystemInformation", # GetLocalTime: watch timestamps
+    "Win32_System_Diagnostics_ToolHelp", # autostart off: find the running watcher
+] }
 
 [profile.release]
 opt-level = "s"

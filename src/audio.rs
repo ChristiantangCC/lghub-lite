@@ -1,5 +1,5 @@
-//! Headset features: 0x1F20 ADC measurement (battery voltage), 0x8300 sidetone, 0x8310
-//! hardware equalizer. Layouts were read from G HUB's own request code (described in
+//! Headset features: 0x1F20 ADC measurement (battery voltage) and 0x8310 hardware
+//! equalizer (read-only). Layouts were read from G HUB's own request code (described in
 //! NOTES.md, not copied) and confirmed on the PRO X Wireless headset (0aba).
 
 use crate::hidpp::{Error, Hidpp};
@@ -47,11 +47,29 @@ pub fn adc(h: &mut Hidpp, dev: u8) -> Result<Adc, Error> {
 #[derive(Debug)]
 pub struct Curve {
     pub pid: u16,
-    /// (volts, mAh used so far), in discharge order (falling volts, rising mAh).
-    points: Vec<(f32, f32)>,
-    /// Sum of the block currents in mA, if the file states them in milliamps.
-    pub draw_ma: Option<f32>,
+    /// (millivolts, micro-amp-hours used so far), in discharge order. Fixed-point integers
+    /// rather than floats: Rust's float parse/format code added ~50 KB to the exe.
+    points: Vec<(u32, u64)>,
+    /// Sum of the block currents in micro-amps, if the file states them in milliamps.
+    pub draw_ua: Option<u64>,
     pub file: String,
+}
+
+/// Parse a plain decimal like `4.102`, `1271.357184` or `53` into an integer scaled by
+/// 10^`digits` (extra fraction digits are truncated). No sign, no exponent.
+pub fn fixed(s: &str, digits: u32) -> Option<u64> {
+    let s = s.trim();
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    if int.is_empty() && frac.is_empty() || !int.bytes().chain(frac.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut v: u64 = if int.is_empty() { 0 } else { int.parse().ok()? };
+    let mut f = frac.bytes();
+    for _ in 0..digits {
+        let d = f.next().map_or(0, |b| (b - b'0') as u64);
+        v = v.checked_mul(10)?.checked_add(d)?;
+    }
+    Some(v)
 }
 
 fn attr(tag: &str, name: &str) -> Option<String> {
@@ -76,9 +94,11 @@ pub fn parse_curve(text: &str, file: &str) -> Result<Curve, String> {
     let body = section(text, "<discharge", "</discharge>").ok_or("no <discharge> block")?;
     let mut points = Vec::new();
     for line in body.lines() {
-        let f: Vec<f32> = line.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-        if let [_minutes, volts, mah] = f[..] {
-            points.push((volts, mah));
+        let f: Vec<&str> = line.split(',').collect();
+        if let [_minutes, volts, mah] = f[..]
+            && let (Some(mv), Some(uah)) = (fixed(volts, 3), fixed(mah, 3))
+        {
+            points.push((mv as u32, uah));
         }
     }
     if points.len() < 2 {
@@ -90,46 +110,49 @@ pub fn parse_curve(text: &str, file: &str) -> Result<Curve, String> {
     if points.windows(2).any(|w| w[1].1 < w[0].1) || points[0].0 <= points[points.len() - 1].0 {
         return Err("discharge rows are not in falling-voltage / rising-mAh order".into());
     }
-    let draw_ma = section(text, "<blocks", "</blocks>")
+    let draw_ua = section(text, "<blocks", "</blocks>")
         .filter(|_| text.contains("default_unit=\"milliamps\""))
         .map(|b| {
             b.split("power=\"")
                 .skip(1)
-                .filter_map(|s| s.split('"').next()?.parse::<f32>().ok())
+                .filter_map(|s| fixed(s.split('"').next()?, 3))
                 .sum()
         })
-        .filter(|&ma: &f32| ma > 0.0);
+        .filter(|&ua: &u64| ua > 0);
     Ok(Curve {
         pid,
         points,
-        draw_ma,
+        draw_ua,
         file: file.to_string(),
     })
 }
 
 impl Curve {
-    fn total(&self) -> f32 {
+    fn total(&self) -> u64 {
         self.points[self.points.len() - 1].1
     }
 
-    /// Remaining share of the discharge capacity at `mv`: the first row at or below that
-    /// voltage gives the mAh already used. This reproduces G HUB's number [HW: 3919 mV ->
-    /// 80.5 %, G HUB showed 80 %]. Only valid while discharging.
-    pub fn remaining_mah(&self, mv: u16) -> f32 {
-        let v = mv as f32 / 1000.0;
-        let used = self.points.iter().find(|p| p.0 <= v).map_or(self.total(), |p| p.1);
-        (self.total() - used).max(0.0)
+    /// Remaining share of the discharge capacity at `mv`, in micro-amp-hours: the first row at
+    /// or below that voltage gives the charge already used. This reproduces G HUB's number
+    /// [HW: 3919 mV -> 80.5 %, G HUB showed 80 %]. Only valid while discharging.
+    pub fn remaining_uah(&self, mv: u16) -> u64 {
+        let used = self
+            .points
+            .iter()
+            .find(|p| p.0 <= mv as u32)
+            .map_or(self.total(), |p| p.1);
+        self.total().saturating_sub(used)
     }
 
     pub fn percent(&self, mv: u16) -> u8 {
-        (100.0 * self.remaining_mah(mv) / self.total())
-            .floor()
-            .clamp(0.0, 100.0) as u8
+        let t = self.total().max(1);
+        (self.remaining_uah(mv) * 100 / t).min(100) as u8
     }
 
-    /// Hours left = remaining mAh / block current [HW: matches G HUB's `mileage` 18.7 h at 78 %].
-    pub fn hours_left(&self, mv: u16) -> Option<f32> {
-        self.draw_ma.map(|ma| self.remaining_mah(mv) / ma)
+    /// Tenths of an hour left = remaining charge / block current [HW: matches G HUB's
+    /// `mileage` 18.7 h at 78 %].
+    pub fn tenths_of_hours_left(&self, mv: u16) -> Option<u64> {
+        self.draw_ua.map(|ua| self.remaining_uah(mv) * 10 / ua)
     }
 }
 
@@ -180,8 +203,8 @@ pub fn voltage_text(a: &Adc, curve: Option<&Curve>) -> String {
     match curve {
         Some(c) => {
             let hours = c
-                .hours_left(a.mv)
-                .map(|h| format!("  ~{h:.1} h left"))
+                .tenths_of_hours_left(a.mv)
+                .map(|t| format!("  ~{}.{} h left", t / 10, t % 10))
                 .unwrap_or_default();
             format!(
                 "{}%{hours}  ({} mV, flags={:#04x}, curve {})",
@@ -198,29 +221,8 @@ pub fn voltage_text(a: &Adc, curve: Option<&Curve>) -> String {
     }
 }
 
-// ---------------------------------------------------------------- 0x8300 sidetone
-
-/// f0 GetSidetoneLevel -> reply[0]. [OBS 0x140d23a70] [HW headset: 0, matching G HUB gain 0]
-pub fn sidetone(h: &mut Hidpp, dev: u8) -> Result<u8, Error> {
-    let fi = h.feature(dev, 0x8300)?;
-    let p = h.call(dev, fi, 0, &[], &[])?;
-    need(&p, 1)?;
-    Ok(p[0])
-}
-
-/// Largest sidetone level we send. G HUB treats it as a 0-100 gain [INF from the agent's
-/// `Volume.gain` field]; UNVERIFIED beyond what is logged in NOTES.md.
-pub const SIDETONE_MAX: u8 = 100;
-
-/// f1 SetSidetoneLevel [level]. [OBS 0x140d23bb0: one parameter byte, reply unused]
-pub fn set_sidetone(h: &mut Hidpp, dev: u8, level: u8) -> Result<(), Error> {
-    if level > SIDETONE_MAX {
-        return Err(Error::Other(format!("sidetone level must be 0..={SIDETONE_MAX}")));
-    }
-    let fi = h.feature(dev, 0x8300)?;
-    h.call(dev, fi, 1, &[level], &[])?;
-    Ok(())
-}
+// 0x8300 sidetone: the HID++ level reads and writes back correctly, but a human heard no
+// effect at 50 [HW], so it is not exposed; findings are kept in NOTES.md.
 
 // ---------------------------------------------------------------- 0x8310 equalizer
 
@@ -328,13 +330,26 @@ mod tests {
     fn curve_parse_and_lookup() {
         let c = parse_curve(SYNTHETIC, "synthetic.xml").unwrap();
         assert_eq!(c.pid, 0x1234);
-        assert_eq!(c.draw_ma, Some(10.0));
+        assert_eq!(c.draw_ua, Some(10_000));
         assert_eq!(c.percent(4200), 100); // above the first row
         assert_eq!(c.percent(4050), 90); // first row <= 4.05 V is 4.00 V, 10 mAh used
         assert_eq!(c.percent(3800), 60);
         assert_eq!(c.percent(3700), 20); // first row <= 3.70 V is 3.60 V, 80 mAh used
         assert_eq!(c.percent(3000), 0);
-        assert_eq!(c.hours_left(3800), Some(6.0));
+        assert_eq!(c.tenths_of_hours_left(3800), Some(60));
+    }
+
+    #[test]
+    fn fixed_point_parsing() {
+        assert_eq!(fixed("4.102", 3), Some(4102));
+        assert_eq!(fixed(" 1271.357184 ", 3), Some(1_271_357)); // extra digits truncated
+        assert_eq!(fixed("53", 3), Some(53_000));
+        assert_eq!(fixed("0.5", 3), Some(500));
+        assert_eq!(fixed(".25", 3), Some(250));
+        assert_eq!(fixed("4.", 3), Some(4000));
+        for bad in ["", ".", "-1", "1e3", "4.1.2", "abc", "99999999999999999999"] {
+            assert_eq!(fixed(bad, 3), None, "{bad}");
+        }
     }
 
     #[test]
@@ -365,7 +380,7 @@ mod tests {
         let no_blocks = r#"<powermodel pid="0x1"><discharge>0, 4.0, 0
 1, 3.5, 50</discharge></powermodel>"#;
         let c = parse_curve(no_blocks, "x").unwrap();
-        assert_eq!((c.percent(3600), c.hours_left(3600)), (0, None));
+        assert_eq!((c.percent(3600), c.tenths_of_hours_left(3600)), (0, None));
     }
 
     #[test]

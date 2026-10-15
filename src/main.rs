@@ -1,34 +1,20 @@
-mod audio;
-mod config;
-mod device;
-mod hid;
-mod hidpp;
-mod profiles;
-mod watch;
-
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use device::parse_selector;
-use hidpp::{DIRECT, Error, Hidpp};
-
-static VERBOSE: AtomicBool = AtomicBool::new(false);
-
-pub fn verbose(args: std::fmt::Arguments) {
-    if VERBOSE.load(Ordering::Relaxed) {
-        eprintln!("{args}");
-    }
-}
-
-pub const LOGITECH_VID: u16 = 0x046D;
+use lghub_lite::device::parse_selector;
+use lghub_lite::hidpp::{self, DIRECT, Error, Hidpp};
+use lghub_lite::{LOGITECH_VID, audio, autostart, config, device, hid, profiles, verbose, watch};
 
 const USAGE: &str = "\
+lghub-lite: control Logitech HID++ mice and headsets without G HUB.
+Not affiliated with or endorsed by Logitech.
+
 usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
 
   devices                  list HID++ devices, including those behind receivers
   watch                    print plug/unplug, receiver connect/disconnect and setting events;
                            applies presets whenever a device connects
+  autostart [on|off]       run the windowless watcher (lghub-lite-bg.exe) at login, or stop it
   presets                  show the preset file
   preset <dev> [dpi=N] [rate=HZ] | clear
                            save (or remove) the preset for this device's model
@@ -38,7 +24,6 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   info <dev>               identity, firmware and supported features
   battery <dev>            battery state (headsets: voltage; percentage needs a power-model
                            XML copied from your own G HUB install into the preset folder)
-  sidetone <dev> [0-100]   read or set headset sidetone (hearing your own voice)
   eq <dev>                 show the headset hardware equalizer (read-only)
   dpi <dev> [value]        read DPI, or set it and read it back
   rate <dev> [hz]          read report rate, or set it and read it back
@@ -82,7 +67,7 @@ fn main() {
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--verbose" | "-v" => VERBOSE.store(true, Ordering::Relaxed),
+            "--verbose" | "-v" => lghub_lite::set_verbose(true),
             "--trace" => opts.trace = true,
             "--allow-raw" => opts.allow_raw = true,
             "--swid" => match it
@@ -104,6 +89,9 @@ fn main() {
     let r = match a.as_slice() {
         ["devices"] => devices(&opts),
         ["watch"] => opts.config_path().and_then(|c| watch::run(opts.swid, opts.trace, &c)),
+        ["autostart"] => autostart_cmd(&opts, None),
+        ["autostart", "on"] => autostart_cmd(&opts, Some(true)),
+        ["autostart", "off"] => autostart_cmd(&opts, Some(false)),
         ["presets"] => presets(&opts),
         ["preset", d, rest @ ..] => preset(&opts, d, rest),
         ["profiles", d] => with_dev(&opts, d, show_profiles),
@@ -117,13 +105,6 @@ fn main() {
         ["battery", d] => {
             let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
             with_dev(&opts, d, |h, dev| battery(h, dev, &dir))
-        }
-        ["sidetone", d] => with_dev(&opts, d, |h, dev| sidetone(h, dev, None)),
-        ["sidetone", d, v] => {
-            let v: u8 = v
-                .parse()
-                .unwrap_or_else(|_| die("sidetone level must be a number 0-100"));
-            with_dev(&opts, d, |h, dev| sidetone(h, dev, Some(v)))
         }
         ["eq", d] => with_dev(&opts, d, eq),
         ["dpi", d] => with_dev(&opts, d, |h, dev| dpi(h, dev, None)),
@@ -545,18 +526,46 @@ fn battery(h: &mut Hidpp, dev: u8, curve_dir: &std::path::Path) -> Result<(), Er
     Ok(())
 }
 
-fn sidetone(h: &mut Hidpp, dev: u8, set: Option<u8>) -> Result<(), Error> {
-    let cur = audio::sidetone(h, dev)?;
-    println!("sidetone   {cur}");
-    let Some(v) = set else { return Ok(()) };
-    println!("old={cur}  (restore with: lghub-lite sidetone <dev> {cur})");
-    audio::set_sidetone(h, dev, v)?;
-    let after = audio::sidetone(h, dev)?;
-    println!("new={v} readback={after}");
-    if after != v {
-        return Err(Error::Other("read-back differs from the value written".into()));
+/// `autostart [on|off]`: the per-user login entry for lghub-lite-bg.exe (status when no arg).
+fn autostart_cmd(o: &Opts, set: Option<bool>) -> Result<(), Error> {
+    let bg = std::env::current_exe()
+        .map_err(|e| Error::Io(e.to_string()))?
+        .with_file_name("lghub-lite-bg.exe");
+    match set {
+        None => {}
+        Some(true) => {
+            if !bg.exists() {
+                return Err(Error::Other(format!(
+                    "{} not found next to lghub-lite.exe",
+                    bg.display()
+                )));
+            }
+            let mut cmd = format!("\"{}\"", bg.display());
+            if let Some(c) = &o.config {
+                cmd.push_str(&format!(" --config \"{}\"", c.display()));
+            }
+            autostart::enable(&cmd).map_err(|e| Error::Io(e.to_string()))?;
+            // Start it now too; a second copy exits on its own (single-instance mutex).
+            autostart::start(&cmd).map_err(|e| Error::Io(e.to_string()))?;
+            println!("autostart  on (started now; log: {})", log_hint(o));
+        }
+        Some(false) => {
+            autostart::disable().map_err(|e| Error::Io(e.to_string()))?;
+            let n = autostart::stop_running("lghub-lite-bg.exe").map_err(|e| Error::Io(e.to_string()))?;
+            println!("autostart  off (stopped {n} running watcher(s))");
+        }
+    }
+    match autostart::status().map_err(|e| Error::Io(e.to_string()))? {
+        Some(cmd) => println!("login      {cmd}"),
+        None => println!("login      not registered"),
     }
     Ok(())
+}
+
+fn log_hint(o: &Opts) -> String {
+    o.curve_dir()
+        .map(|d| d.join("watch.log").display().to_string())
+        .unwrap_or_else(|_| "watch.log next to the preset file".into())
 }
 
 /// Read-only view of the headset hardware EQ (writing is not supported; see audio.rs).
