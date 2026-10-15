@@ -10,6 +10,7 @@
 
 mod demo;
 mod fonts;
+mod glow;
 mod history;
 mod skin;
 mod view;

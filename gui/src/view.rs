@@ -222,7 +222,7 @@ fn chip_at(
     resp
 }
 
-/// Text with the design's `text-shadow: 0 0 14px` glow, approximated with soft copies.
+/// Text with the design's `text-shadow: 0 0 14px <color>55` glow (a real blur, see glow.rs).
 #[allow(clippy::too_many_arguments)]
 fn glow_text(p: &Painter, pos: Pos2, align: Align2, s: &str, family: &str, size: f32, color: Color32, bold: bool) {
     // the design's letter-spacing: -.02em
@@ -239,13 +239,7 @@ fn glow_text(p: &Painter, pos: Pos2, align: Align2, s: &str, family: &str, size:
     );
     let galley = p.layout_job(job);
     let rect = align.anchor_size(pos, galley.size());
-    for (r, a, n) in [(9.0, 5u8, 12), (5.0, 8, 10), (2.5, 9, 8)] {
-        for i in 0..n {
-            let ang = i as f32 / n as f32 * std::f32::consts::TAU;
-            let o = vec2(ang.cos(), ang.sin()) * r;
-            p.galley_with_override_text_color(rect.min + o, galley.clone(), alpha(color, a));
-        }
-    }
+    crate::glow::paint(p, rect.min, &galley, 14.0, alpha(color, 0x55), bold);
     p.galley(rect.min, galley.clone(), color);
     if bold {
         // VT323 has one weight; the browser fakes the design's 600 by smearing it sideways
