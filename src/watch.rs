@@ -605,7 +605,12 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
     let (battery, battery_percent) = if has_voltage {
         let dir = l.dir();
         dev.model = device::model_id(&mut l.h, index).unwrap_or(l.pid);
-        // A discharge may have ended while nothing was running: build from it first.
+        let adc = audio::adc(&mut l.h, index);
+        if let Ok(a) = &adc {
+            learn(&dir, &mut dev, a, &sel, out);
+        }
+        // The headset may have been charged while nothing was running; the reading just
+        // recorded then closes the discharge before it, so build from it now.
         match battery::update_measured(&dir, dev.model) {
             Ok(Some(_)) => out.push(Update::Line(format!(
                 "  {sel:<8} battery curve updated from the recorded discharge"
@@ -613,16 +618,16 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
             Ok(None) => {}
             Err(e) => crate::verbose(format_args!("{sel}: no new measured curve: {e}")),
         }
-        dev.curve = Some(battery::find_curve(&dir, dev.model));
-        match audio::adc(&mut l.h, index) {
+        let c = battery::find_curve(&dir, dev.model);
+        let r = match adc {
             Ok(a) => {
-                learn(&dir, &mut dev, &a, &sel, out);
-                let c = dev.curve.as_ref().expect("set above");
-                dev.last_battery = battery_key(&a, Some(c));
-                (Some(audio::voltage_text(&a, c)), Some(c.percent(a.mv)))
+                dev.last_battery = battery_key(&a, Some(&c));
+                (Some(audio::voltage_text(&a, &c)), Some(c.percent(a.mv)))
             }
             Err(e) => (Some(format!("unreadable: {e}")), None),
-        }
+        };
+        dev.curve = Some(c);
+        r
     } else {
         match device::battery(&mut l.h, index) {
             Ok(b) => (Some(b.to_string()), b.percent()),

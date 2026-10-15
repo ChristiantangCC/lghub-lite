@@ -401,7 +401,8 @@ pub fn read_log(dir: &Path, model: u16) -> Vec<Sample> {
 
 // ---------------------------------------------------------------- building a curve
 
-/// A discharge counts as complete from at or above FULL down to at or below EMPTY.
+/// A discharge counts as complete from at or above FULL down to at or below EMPTY, once
+/// charging has started after it.
 pub const FULL_MV: u16 = 4000;
 pub const EMPTY_MV: u16 = 3550;
 /// A rise of this much over the running minimum means charging: the discharge ended.
@@ -410,14 +411,14 @@ pub const CHARGE_RISE_MV: u16 = 60;
 const MAX_GAP_S: u64 = 15 * 60;
 
 /// Split the recording into discharges (a charging rise ends one) and return the newest
-/// complete one as an index range.
+/// complete one as an index range. A discharge still running is never used: built early it
+/// would end at whatever voltage was last read, and be counted again once it really ends.
 fn latest_complete(samples: &[Sample]) -> Option<(usize, usize)> {
     let mut best = None;
     let mut start = 0;
     let mut min_mv = u16::MAX;
-    for i in 0..=samples.len() {
-        let ends = i == samples.len() || samples[i].mv > min_mv.saturating_add(CHARGE_RISE_MV);
-        if ends {
+    for i in 0..samples.len() {
+        if samples[i].mv > min_mv.saturating_add(CHARGE_RISE_MV) {
             if i > start {
                 let s = &samples[start..i];
                 let top = s.iter().map(|x| x.mv).max().unwrap_or(0);
@@ -429,9 +430,7 @@ fn latest_complete(samples: &[Sample]) -> Option<(usize, usize)> {
             start = i;
             min_mv = u16::MAX;
         }
-        if i < samples.len() {
-            min_mv = min_mv.min(samples[i].mv);
-        }
+        min_mv = min_mv.min(samples[i].mv);
     }
     best
 }
@@ -459,7 +458,7 @@ fn active_seconds(s: &[Sample]) -> Vec<u64> {
 pub fn build_from(samples: &[Sample], model: u16) -> Result<Curve, String> {
     let (a, b) = latest_complete(samples).ok_or_else(|| {
         format!(
-            "no complete discharge recorded yet (needs one from {FULL_MV} mV or above down to {EMPTY_MV} mV or below)"
+            "no complete discharge recorded yet (needs one from {FULL_MV} mV or above down to {EMPTY_MV} mV or below, followed by charging)"
         )
     })?;
     let s = &samples[a..b];
@@ -557,7 +556,7 @@ pub fn recording_status(dir: &Path, model: u16) -> String {
         "no complete discharge yet"
     };
     format!(
-        "{} readings over {}.{} h of use, {top}–{low} mV; {complete} (needs ≥ {FULL_MV} mV down to ≤ {EMPTY_MV} mV)",
+        "{} readings over {}.{} h of use, {top}–{low} mV; {complete} (needs ≥ {FULL_MV} mV down to ≤ {EMPTY_MV} mV, then charging)",
         s.len(),
         hours / 10,
         hours % 10
@@ -687,6 +686,9 @@ mod tests {
         let mut s = synthetic_discharge(0);
         s.retain(|x| x.mv >= 3700); // never reached empty
         assert!(build_from(&s, 1).unwrap_err().contains("no complete discharge"));
+        let mut running = synthetic_discharge(0);
+        running.pop(); // reached empty, but charging has not started: still running
+        assert!(build_from(&running, 1).unwrap_err().contains("no complete discharge"));
         let short: Vec<Sample> = (0..10)
             .map(|i| Sample {
                 t: i * 300,
