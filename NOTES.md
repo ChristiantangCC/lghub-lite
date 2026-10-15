@@ -272,6 +272,7 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 | LIGHTSPEED | presets: save 1200/500 (scratch file), reject dpi=50, `apply` twice, then onboard mode and `watch` start-up | ✅ apply: "host mode, dpi 1200, rate 500", then "(already)" on the second run; `watch` applied the same at start-up and printed the device's DPI/rate events; restored onboard, 800, 1000 Hz |
 | 2026-10-15 | SL2 | LIGHTSPEED | onboard memory: `profiles`, two `dump`s, backup to %APPDATA% | ✅ 16 user sectors erased; factory directory 0x0100 → profile 0x0101 (active); device GetCRC = our CRC for erased sectors; dumps byte-identical; read-only throughout |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
+| 2026-10-15 | headset 0aba | USB (own dongle) | human copied the power-model XML into %APPDATA%\lghub-lite; `battery 0aba` | ✅ percentage shown (human-confirmed); our test copy: 78 % / 18.8 h vs G HUB 78 % / 18.7 h; watch printed the 78 → 77 % drop from its 5-min read |
 | 2026-10-15 | headset 0aba | USB (own dongle) | 0x1F20 battery, 0x8300 sidetone read + write 30 → read-back → 0, 0x8310 EQ read + write attempt | ✅ 3919 mV vs G HUB 80 %; sidetone write/read-back ok; EQ read ok; EQ write refused (InvalidArgument, unchanged) → write removed |
 | — | — | — | `cargo test`: 35 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
