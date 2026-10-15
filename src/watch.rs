@@ -143,6 +143,11 @@ fn attach(l: &mut Live, index: u8) {
     let sel = l.sel(index);
     let (maj, min) = match l.h.ping(index, 0x5A) {
         Ok(v) => v,
+        // [HW] the receiver answers 0x8F code 0x08 at once for a paired device whose link is down.
+        Err(Error::Hpp10(0x08)) => {
+            println!("  {sel:<8} offline (paired, not connected)");
+            return;
+        }
         Err(e) => {
             println!("  {sel:<8} offline ({e})");
             return;

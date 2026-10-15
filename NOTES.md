@@ -20,7 +20,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `dpi <dev> [v]` | ✅ read via 0x2201/0x2202. ✅ write via 0x2202 with read-back in host mode, over the cable and the receiver. 0x2201 write is unverified (no device) |
 | `rate <dev> [hz]` | ✅ 0x8061 read/write with read-back in host mode, over the cable and the receiver. The Hz mapping is [PUB] and unmeasured |
 | `mode <dev> [host\|onboard]` | ✅ 0x8100 get/set with read-back, over the cable and the receiver |
-| `watch` | ✅ event-driven monitor: device arrival/removal, receiver slot connect/disconnect, DPI/rate/battery events. Idle CPU 0, one thread. Physical plug/unplug and power-off are not yet exercised (TEST REQUEST 5) |
+| `watch` | ✅ event-driven monitor: device arrival/removal, receiver slot connect/disconnect (incl. sleep/wake), DPI/rate/battery events. Idle CPU 0, one thread. Human-run hot-plug test passed (TEST REQUEST 5) |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
 
@@ -81,12 +81,19 @@ Single binary crate, no traits, no async:
 - **Pairing info.** `-> 10 FF 83 B5 20 00 00`, `<- 11 FF 83 B5 20 08 08 40 A9 11 00 02 B1 01 00 00 7F 24 00 00`. [OBS §9.8 request; PUB layout; HW]
   - `p[3..5]` = wireless PID 0x40A9 (big-endian); `p[7]&0x0F` = 2 = mouse.
 - **Online check.** Root ping to device index `slot+1`. [HW]
+  - For a paired device whose link is down, the receiver answers at once with `8F` code **0x08** ("unknown device" [PUB]), not a timeout. [HW, receiver just plugged in before the mouse linked] So `devices` and `watch` stay fast with the mouse off; the retries are not used for this case.
 
 ### Events decoded by `watch`
 HID++ 2.0 events have swid 0 and fn 0 on a known feature index [OBS §9.5].
-- **0x41 connection** [OBS §9.8]: `rsp[1]` = device index, `rsp[3]` = protocol, `rsp[4]` bits 0–3 = type, **bit 6 = link not established**, `rsp[5..6]` = wireless PID little-endian. **Not yet seen on hardware** (TEST REQUEST 5).
-- **0x40 with `rsp[3]==0x02`**: unpaired or disconnected [OBS §9.8]. Not yet seen on hardware.
-- **0x1004 battery event**: same layout as f1 [OBS §10.5]. Not yet seen on hardware.
+- **0x41 connection** [OBS §9.8] [HW]: `rsp[1]` = device index, `rsp[3]` = protocol, `rsp[4]` bits 0–3 = type, **bit 6 = link not established**, `rsp[5..6]` = wireless PID little-endian.
+  - [HW] decoded as `slot 1 … wpid=40a9 kind=mouse protocol=0x11`. The wpid and kind agree with the B5 pairing reply.
+  - Seen on mouse power off ("link lost") and on (connected).
+  - Also seen on **sleep**: after a few idle minutes, "link lost", then "connected" on the first movement.
+  - Protocol byte 0x11 meaning [UNK]; G HUB skips protocol 2 (§9.8).
+- **On reconnect the SL2 announces its state unasked:** a 0x2202 DPI event, a 0x8061 rate event and a 0x1004 battery event, in that order. [HW]
+- **0x40 with `rsp[3]==0x02`**: unpaired or disconnected [OBS §9.8]. Not seen; power-off and sleep use 0x41 with bit 6 instead. [HW]
+- **0x1004 battery event**: same layout as f1. [OBS §10.5] [HW: `battery 56% level=good discharging external=none` after reconnect]
+- **Removal.** The pending read fails with `ERROR_DEVICE_NOT_CONNECTED` (1167), usually before the PnP notification arrives. `watch` drops the interface on either signal. [HW receiver and cable]
 - **0x2202 DPI event** `[sensor, X, Y, lod]`. [HW] `11 FF 09 00 00 06 40 06 40 02` (cable); `11 01 09 00 00 03 20 03 20 02` (receiver), seen by `watch` while another process wrote DPI.
 - **0x8061 rate event** `[connType, bit]`. [HW] `11 FF 0C 00 00 02` (cable); `11 01 0C 00 01 03` (receiver).
 
@@ -181,6 +188,7 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 | LIGHTSPEED | `watch` while another process ran host → DPI 1200 → 800 → onboard | ✅ DPI write read back over the receiver; `watch` printed both DPI events and the rate event on return to onboard |
 | 2026-10-15 | SL2 | LIGHTSPEED | report rate with connType fix: host → 500 → 1000 → onboard | ✅ read-back 500 then 1000; wireless bitmap 125–8000 Hz; final state onboard, 1000 Hz |
 | 2026-10-15 | SL2 | LIGHTSPEED | `watch` idle 30 s | ✅ 0 ms CPU, 1 thread, 5.6 MB working set |
+| 2026-10-15 | SL2 + receiver | LIGHTSPEED / cable | human run of TEST REQUEST 5 with `watch`: mouse off/on, cable in/out, receiver out/in, idle sleep then move | ✅ 0x41 link lost/connected on power cycle and on sleep/wake; re-announced DPI/rate/battery events; receiver and cable removal (os error 1167) and arrival; slot ping before link-up answered 0x08 |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
 | — | — | — | `cargo test`: 20 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
@@ -199,23 +207,11 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 - Commands: host mode, then `rate <dev> 125` and measure with a polling-rate checker, then `rate <dev> 1000` and measure, then onboard.
 - Expected: about 125 Hz, then about 1000 Hz. This would turn the [PUB] bit → Hz mapping into [HW].
 
-**TEST REQUEST 5: hot-plug and wireless connect/disconnect.** G HUB can stay open.
-- Start `lghub-lite watch` in a terminal and leave it running, then:
-  1. Turn the mouse off with its switch, wait 5 s, and turn it on again.
-  2. Plug the USB cable into the mouse, wait, then unplug it.
-  3. Unplug the receiver, wait, then plug it back in.
-  4. Leave the mouse idle for a few minutes, then move it.
-- Expected output:
-  - step 1: `slot 1: link lost …`, then `slot 1: connected …` and `+ c54d:1 PRO X 2 …`;
-  - steps 2–3: `- … removed` and `+ …` lines;
-  - battery events whenever the level changes.
-- Please send the output. The 0x41/0x40 layouts are only [OBS] so far.
-- Restore: nothing is written.
+TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on 2026-10-15; see §5.
 
 ## 7. Open questions
 - Does host mode (0x8100 = 2) persist across a power cycle or a cable unplug? [UNK]
 - **0x8061:** the bit → Hz mapping is only [PUB] (TEST REQUEST 4). How should connType be chosen for direct Bluetooth devices? [UNK]
-- **Sleep:** what does a receiver answer for a paired device that is off: timeout or an error code? [UNK] This determines how long `devices` takes with the mouse off (up to 3 attempts × 600 ms per slot).
 - **0x1F20 ADCMeasurement** reply layout for headset battery [UNK]. G HUB maps mV through the depot XML curve (§10.6).
 - **B5 pairing reply:** bytes p[1], p[2], p[5..] not decoded.
 - **Unknown SL2 feature IDs:** 0x2251, 0x80E0, 0x1602, plus the engineering IDs 0x1803/0x1817/0x1830/0x1875/0x1861/0x1E02/0x1E22/0x1EB0/0x18B1.
@@ -226,7 +222,7 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` size | **202,240 B** with `watch` (191,488 B before; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
+| `lghub-lite.exe` size | **203,264 B** with `watch` (191,488 B before; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
 | Crates in tree | 3 (`lghub-lite`, `windows-sys`, `windows-link`) |
 | `devices` wall time | median 105 ms, min 101 ms (10 runs; SL2 wired + headset, includes HID++ round trips) |
 | `collections` wall time (enumeration only) | median 49 ms |

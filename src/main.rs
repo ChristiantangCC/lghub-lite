@@ -180,6 +180,8 @@ fn receiver_slots(h: &mut Hidpp, pid: u16) {
                 let name = device::name(h, idx).unwrap_or_default();
                 format!("{name}  (HID++ {maj}.{min}, online)")
             }
+            // [HW] the receiver answers 0x8F code 0x08 at once for a paired device whose link is down.
+            Err(Error::Hpp10(0x08)) => "(offline: paired, not connected)".to_string(),
             Err(e) => format!("(offline: {e})"),
         };
         h.timeout = Duration::from_millis(2000);
