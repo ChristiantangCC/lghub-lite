@@ -156,6 +156,51 @@ impl Curve {
     }
 }
 
+/// Where G HUB keeps its downloaded device resources (power models among them).
+pub const GHUB_DEPOTS: &str = r"C:\ProgramData\LGHUB\depots";
+
+/// Look for a power model for `pid` in a local G HUB install (`GHUB_DEPOTS`, at most three
+/// folders deep, file names containing "battery"). Only used when the user asks to import one;
+/// lghub-lite never reads G HUB's folders otherwise.
+pub fn find_ghub_curve(pid: u16) -> Option<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, depth: u8, pid: u16) -> Option<std::path::PathBuf> {
+        for e in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = e.path();
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.is_dir() {
+                if depth > 0
+                    && let Some(p) = walk(&path, depth - 1, pid)
+                {
+                    return Some(p);
+                }
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !name.ends_with(".xml") || !name.contains("battery") || meta.len() > 4 << 20 {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && parse_curve(&text, &name).is_ok_and(|c| c.pid == pid)
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+    walk(std::path::Path::new(GHUB_DEPOTS), 3, pid)
+}
+
+/// Copy a power-model file into `dest_dir` (the user's own copy; see `find_curve`).
+pub fn import_curve(src: &std::path::Path, dest_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dest_dir)?;
+    let dest = dest_dir.join(src.file_name().unwrap_or_default());
+    std::fs::copy(src, &dest)?;
+    Ok(dest)
+}
+
 /// Find a curve for `pid` among the *.xml files in `dir` (files over 4 MB are ignored).
 pub fn find_curve(dir: &std::path::Path, pid: u16) -> Option<Curve> {
     let entries = std::fs::read_dir(dir).ok()?;

@@ -6,7 +6,8 @@ param([Parameter(Mandatory)][string]$Path, [string]$Out)
 $ws = New-Object System.Net.WebSockets.ClientWebSocket
 $ws.Options.AddSubProtocol('json')   # no Origin header is sent (protocol.md §9.11)
 $ct = [Threading.CancellationToken]::None
-$ws.ConnectAsync([Uri]'ws://127.0.0.1:9010', $ct).Wait()
+try { $ws.ConnectAsync([Uri]'ws://127.0.0.1:9010', $ct).Wait() }
+catch { Write-Error "G HUB agent is not reachable on ws://127.0.0.1:9010 (is G HUB running?)"; exit 1 }
 
 $req = '{"msgId":"q1","verb":"GET","path":"' + $Path + '"}'
 $b = [Text.Encoding]::UTF8.GetBytes($req)

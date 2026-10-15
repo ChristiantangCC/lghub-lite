@@ -140,6 +140,10 @@ pub struct Snapshot {
     pub name: String,
     pub battery: Option<String>,
     pub battery_percent: Option<u8>,
+    /// Battery voltage for devices that only report a voltage (0x1F20).
+    pub voltage_mv: Option<u16>,
+    /// A voltage-only battery without a curve file: a percentage needs one.
+    pub needs_curve: bool,
     pub dpi: Option<Dpi>,
     /// (current Hz, allowed Hz)
     pub rate: Option<(u32, Vec<u32>)>,
@@ -358,7 +362,22 @@ impl Monitor {
             .find(|d| d.index == i)
             .map(|d| d.name.clone())
             .unwrap_or_default();
-        let (battery, battery_percent) = battery_now(l, i);
+        // A curve file may have been added since the device attached (GUI import): look again.
+        if let Some(d) = l
+            .devs
+            .iter_mut()
+            .find(|d| d.index == i && d.has_voltage && d.curve.is_none())
+        {
+            let dir = l.presets.parent().map(Path::to_path_buf).unwrap_or_default();
+            d.curve = device::model_id(&mut l.h, i)
+                .ok()
+                .and_then(|m| audio::find_curve(&dir, m));
+        }
+        let needs_curve = l
+            .devs
+            .iter()
+            .any(|d| d.index == i && d.has_voltage && d.curve.is_none());
+        let (battery, battery_percent, voltage_mv) = battery_now(l, i);
         let dpi = optional(device::dpi(&mut l.h, i))?;
         let rate = optional(device::report_rate(&mut l.h, i))?.map(|r| {
             let allowed = (0..8u8)
@@ -381,6 +400,8 @@ impl Monitor {
             name,
             battery,
             battery_percent,
+            voltage_mv,
+            needs_curve,
             dpi,
             rate,
             mode,
@@ -441,20 +462,25 @@ fn removed(l: &Live, reason: Option<String>) -> Update {
     }
 }
 
-/// Battery text and percent for a device: 0x1004/0x1000/0x1001 or 0x1F20 with a curve.
-fn battery_now(l: &mut Live, index: u8) -> (Option<String>, Option<u8>) {
+/// Battery text, percent and (for voltage-only batteries) millivolts for a device:
+/// 0x1004/0x1000/0x1001, or 0x1F20 with a curve.
+fn battery_now(l: &mut Live, index: u8) -> (Option<String>, Option<u8>, Option<u16>) {
     let d = l.devs.iter().find(|d| d.index == index);
     if d.is_some_and(|d| d.has_voltage) {
         let curve = d.and_then(|d| d.curve.as_ref());
         return match audio::adc(&mut l.h, index) {
-            Ok(a) => (Some(audio::voltage_text(&a, curve)), curve.map(|c| c.percent(a.mv))),
-            Err(e) => (Some(format!("unreadable: {e}")), None),
+            Ok(a) => (
+                Some(audio::voltage_text(&a, curve)),
+                curve.map(|c| c.percent(a.mv)),
+                Some(a.mv),
+            ),
+            Err(e) => (Some(format!("unreadable: {e}")), None, None),
         };
     }
     match device::battery(&mut l.h, index) {
-        Ok(b) => (Some(b.to_string()), b.percent()),
-        Err(Error::NoFeature(_)) => (None, None),
-        Err(e) => (Some(format!("unreadable: {e}")), None),
+        Ok(b) => (Some(b.to_string()), b.percent(), None),
+        Err(Error::NoFeature(_)) => (None, None, None),
+        Err(e) => (Some(format!("unreadable: {e}")), None, None),
     }
 }
 

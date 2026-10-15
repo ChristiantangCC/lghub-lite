@@ -18,7 +18,7 @@ use eframe::egui;
 use lghub_lite::device::{Event, MODE_HOST, MODE_ONBOARD};
 use lghub_lite::hid::Waker;
 use lghub_lite::watch::{self, Cmd, Monitor, Snapshot, Update};
-use lghub_lite::{autostart, config, hidpp};
+use lghub_lite::{audio, autostart, config, hidpp};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -69,6 +69,10 @@ struct App {
     quitting: bool,
     autostart_gui: bool,
     bg_running: bool,
+    /// Folder of the preset file; battery curve files live here too.
+    curve_dir: PathBuf,
+    /// For a voltage-only device without a curve: (model, G HUB curve file if found).
+    ghub_curve: Option<(u16, Option<PathBuf>)>,
 }
 
 fn main() {
@@ -112,6 +116,7 @@ fn main() {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, cfg: PathBuf, bg_running: bool) -> App {
         let ctx = cc.egui_ctx.clone();
+        let curve_dir = cfg.parent().map(PathBuf::from).unwrap_or_default();
         let (tx, worker_rx) = channel();
         let (worker_tx, rx) = channel();
         let waker = Arc::new(Waker::new().expect("cannot create event"));
@@ -143,6 +148,8 @@ impl App {
             quitting: false,
             autostart_gui,
             bg_running,
+            curve_dir,
+            ghub_curve: None,
         }
     }
 
@@ -340,6 +347,12 @@ impl eframe::App for App {
                             if let Some(d) = &s.dpi {
                                 self.dpi_input = d.current.to_string();
                             }
+                            if s.needs_curve
+                                && let Some(m) = s.model
+                                && self.ghub_curve.as_ref().is_none_or(|g| g.0 != m)
+                            {
+                                self.ghub_curve = Some((m, audio::find_ghub_curve(m)));
+                            }
                             if let Some(row) = self.rows.iter_mut().find(|r| r.sel == sel) {
                                 row.battery = s.battery.clone();
                                 row.percent = s.battery_percent;
@@ -422,7 +435,13 @@ impl App {
         };
         let online = self.rows.iter().any(|r| r.sel == sel && r.online);
         let Some(s) = self.snap.as_ref().filter(|s| s.sel == sel) else {
-            if online {
+            if let Some((true, e)) = &self.message {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+                if ui.button("Try again").clicked() {
+                    self.message = None;
+                    self.refresh_selected();
+                }
+            } else if online {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Reading device…");
@@ -443,7 +462,33 @@ impl App {
         ui.add_space(6.0);
 
         // Battery
+        let mut import: Option<PathBuf> = None;
+        if s.needs_curve {
+            if let Some(mv) = s.voltage_mv {
+                ui.label(egui::RichText::new(format!("Battery: {}.{:02} V", mv / 1000, mv % 1000 / 10)).strong());
+            }
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.label("This headset only reports its battery voltage. To show a percentage and time left, lghub-lite needs Logitech's battery curve file for it.");
+                ui.horizontal(|ui| {
+                    match self.ghub_curve.as_ref().and_then(|g| g.1.clone()) {
+                        Some(src) => {
+                            if ui.button("Import from G HUB").on_hover_text(src.display().to_string()).clicked() {
+                                import = Some(src);
+                            }
+                        }
+                        None => {
+                            ui.weak("Not found in a G HUB install on this PC; see the README.");
+                        }
+                    }
+                    if ui.button("Open folder").on_hover_text(self.curve_dir.display().to_string()).clicked() {
+                        let _ = std::fs::create_dir_all(&self.curve_dir);
+                        let _ = std::process::Command::new("explorer").arg(&self.curve_dir).spawn();
+                    }
+                });
+            });
+        }
         match (s.battery_percent, &s.battery) {
+            (None, Some(_)) if s.needs_curve => {}
             (Some(p), text) => {
                 let detail = text.as_deref().unwrap_or("");
                 ui.add(
@@ -554,6 +599,16 @@ impl App {
         if let Some(c) = cmd {
             self.message = None;
             self.send(&sel, c);
+        }
+        if let Some(src) = import {
+            match audio::import_curve(&src, &self.curve_dir) {
+                Ok(dest) => {
+                    self.message = Some((false, format!("Imported {}", dest.display())));
+                    self.ghub_curve = None;
+                    self.send(&sel, Cmd::Refresh);
+                }
+                Err(e) => self.message = Some((true, format!("Import failed: {e}"))),
+            }
         }
         if let Some((err, text)) = &self.message {
             let color = if *err {
