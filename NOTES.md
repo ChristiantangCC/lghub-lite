@@ -17,7 +17,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `devices` | ✅ direct devices, receivers, and paired slots with online state |
 | `info <dev>` | ✅ protocol version, name, type, firmware entities, full feature table |
 | `battery <dev>` | ✅ SL2 via 0x1004 (receiver and cable). ✅ Headset via 0x1F20: voltage plus an estimated % from our own calibration table |
-| `sidetone <dev> [0-100]` | ✅ headset 0x8300 read/write with read-back. Audible effect not yet confirmed by the human |
+| `sidetone <dev> [0-100]` | ⚠️ headset 0x8300 read/write with read-back works, but **no audible effect at 50** (human test 2026-10-15). Real control path unknown |
 | `eq <dev>` | ✅ headset 0x8310 hardware EQ, **read-only** (10 bands, ±12 dB). Writing is not supported; see §2 Headset |
 | `dpi <dev> [v]` | ✅ read via 0x2201/0x2202. ✅ write via 0x2202 with read-back in host mode, over the cable and the receiver. 0x2201 write is unverified (no device) |
 | `rate <dev> [hz]` | ✅ 0x8061 read/write with read-back in host mode, over the cable and the receiver. The Hz mapping is [PUB] and unmeasured |
@@ -201,6 +201,7 @@ The function layouts were read from G HUB's request code with Rizin, against the
     - [HW] `-> 11 FF 06 03 00`, `<- 11 FF 06 03 0F 4F 01` = **3919 mV**, flags 0x01, while G HUB showed 80 %, not charging. So bit 0 is not "charging".
   - f1 → one byte; [HW] `1E` (30), meaning [UNK].
   - f2 sets one byte, f3 returns 2 bytes, f4 writes `[01, x]`: notification/config [INF]. These are not used.
+- **Linear estimate is inadequate** [HW+file check]: G HUB's own percentage = remaining share of the discharge capacity at that voltage, and that curve is strongly non-linear (≈91 % at 4.0 V, 80.5 % at 3.919 V matching G HUB's 80 %, 63 % at 3.8 V, 28 % at 3.7 V). A 3-point linear table errs by >20 points near 3.7 V. Replacement pending the human's decision (see §7).
 - **Battery percentage** is **our own table**, not G HUB's curve file. G HUB's percentages come from the proprietary XML curve (§10.6), which we neither copy nor read at runtime (brief §2).
   - The ends are generic single-cell Li-ion values [PUB]: 3.3 V = 0 %, 4.2 V = 100 %.
   - The inner points are our voltage readings paired with G HUB's % at the same moment, collected by `tools/calibrate.ps1` into `tools/battery-calibration.csv`. So far 1 point: (3917–3919 mV, 80 %).
@@ -283,7 +284,7 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 
 TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on 2026-10-15; see §5.
 
-**TEST REQUEST 7: headset sidetone is audible.** G HUB can stay open.
+**TEST REQUEST 7: headset sidetone is audible.** ❌ Failed on 2026-10-15: set 50 (read-back 50), human heard nothing; restored 0. Possible causes [INF]: a different value scale; or the effective sidetone being the USB-audio mixer control that G HUB's audio side uses rather than HID++ 0x8300. Open. G HUB can stay open.
 - Commands: put the headset on, then `lghub-lite sidetone 0aba 50`, speak, then `lghub-lite sidetone 0aba 0`.
 - What to observe: at 50 you hear your own voice in the headset; at 0 you don't.
 - Also report whether G HUB later puts it back to 0 by itself.
