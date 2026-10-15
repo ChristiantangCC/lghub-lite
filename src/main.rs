@@ -25,6 +25,7 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] <command>
   info <dev>               identity, firmware and supported features
   battery <dev>            battery state
   dpi <dev> [value]        read DPI, or set it and read it back
+  mode <dev> [host|onboard] read or set onboard-profile mode (host mode allows DPI writes)
   raw <dev> <hex...>       send one raw report, print replies (needs --allow-raw)
   collections              list every Logitech HID collection (debug)
 
@@ -74,6 +75,9 @@ fn main() {
             let v: u16 = v.parse().unwrap_or_else(|_| die("DPI value must be a number"));
             with_dev(&opts, d, |h, dev| dpi(h, dev, Some(v)))
         }
+        ["mode", d] => with_dev(&opts, d, |h, dev| mode(h, dev, None)),
+        ["mode", d, "host"] => with_dev(&opts, d, |h, dev| mode(h, dev, Some(device::MODE_HOST))),
+        ["mode", d, "onboard"] => with_dev(&opts, d, |h, dev| mode(h, dev, Some(device::MODE_ONBOARD))),
         ["raw", d, bytes @ ..] if !bytes.is_empty() => {
             if !opts.allow_raw {
                 die("raw sends arbitrary bytes to hardware; pass --allow-raw to confirm");
@@ -239,20 +243,15 @@ fn dpi(h: &mut Hidpp, dev: u8, set: Option<u16>) -> Result<(), Error> {
     }
     let mode = device::onboard_mode(h, dev).ok().flatten();
     if let Some(m) = mode {
-        let s = match m {
-            1 => "onboard",
-            2 => "host",
-            _ => "?",
-        };
-        println!("profiles   mode {m} ({s})");
+        println!("profiles   mode {m} ({})", device::mode_name(m));
     }
     let Some(v) = set else { return Ok(()) };
     println!("old={}  (restore with: lghub-lite dpi <dev> {})", d.current, d.current);
     match device::set_dpi(h, dev, &d, v) {
         // [HW] SL2 answers NotAllowed to 0x2202 f6 while 0x8100 reports onboard mode.
-        Err(Error::Hpp20(5)) if mode == Some(1) => {
+        Err(Error::Hpp20(5)) if mode == Some(device::MODE_ONBOARD) => {
             return Err(Error::Other(
-                "device refused (NotAllowed): it is in onboard-profile mode; DPI comes from the stored profile".into(),
+                "device refused (NotAllowed): it is in onboard-profile mode; run `mode <dev> host` first".into(),
             ));
         }
         r => r?,
@@ -261,6 +260,19 @@ fn dpi(h: &mut Hidpp, dev: u8, set: Option<u16>) -> Result<(), Error> {
     println!("new={v} readback={}", after.current);
     if after.current != v {
         return Err(Error::Other("read-back differs from the value written".into()));
+    }
+    Ok(())
+}
+
+fn mode(h: &mut Hidpp, dev: u8, set: Option<u8>) -> Result<(), Error> {
+    let cur = device::onboard_mode(h, dev)?.ok_or(Error::NoFeature(0x8100))?;
+    println!("mode       {cur} ({})", device::mode_name(cur));
+    let Some(m) = set else { return Ok(()) };
+    device::set_onboard_mode(h, dev, m)?;
+    let after = device::onboard_mode(h, dev)?.unwrap_or(0);
+    println!("new={m} readback={after} ({})", device::mode_name(after));
+    if after != m {
+        return Err(Error::Other("read-back differs from the mode written".into()));
     }
     Ok(())
 }

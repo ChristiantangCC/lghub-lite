@@ -388,7 +388,7 @@ impl std::fmt::Display for DpiCaps {
 
 /// DPI capability stream: BE16 values, 0x0000 terminates, 0xE0xx means "step xx" between
 /// the neighbouring values (step from the low byte only). Used by 0x2201 f1 and 0x2202 f2.
-/// [OBS �9.9; dec_all.c FUN_140ccee80, FUN_140cd04e0]
+/// [OBS §9.9; dec_all.c FUN_140ccee80, FUN_140cd04e0]
 /// Returns None if no terminator was found (more pages needed).
 pub fn parse_dpi_list(p: &[u8]) -> Result<Option<DpiCaps>, Error> {
     let mut points = Vec::new();
@@ -451,7 +451,7 @@ pub fn dpi(h: &mut Hidpp, dev: u8) -> Result<Dpi, Error> {
 }
 
 /// 0x2201: f1 [sensor] -> [sensor, list...]; f2 [sensor] -> [sensor, cur BE16, def BE16].
-/// Replies echo the sensor in byte 4. [OBS �9.9; FUN_140ccee80, FUN_140ccf280]
+/// Replies echo the sensor in byte 4. [OBS §9.9; FUN_140ccee80, FUN_140ccf280]
 fn dpi_2201(h: &mut Hidpp, dev: u8, index: u8, version: u8) -> Result<Dpi, Error> {
     let l = h.call(dev, index, 1, &[0], &[4])?;
     need(&l, 3)?;
@@ -473,9 +473,9 @@ fn dpi_2201(h: &mut Hidpp, dev: u8, index: u8, version: u8) -> Result<Dpi, Error
 /// 0x2202 (feature version < 4 page form):
 /// - f2 [sensor, dir, page] -> echo of those 3 bytes, then a slice of the capability byte
 ///   stream; pages are concatenated (values may straddle pages) until a terminator.
-/// - f5 [sensor] -> [sensor, x BE16, y BE16, defX BE16, defY BE16, lod].
+/// - f5 [sensor] -> see `parse_2202_params`.
 ///
-/// [OBS �9.9; dec_all.c FUN_140cd04e0, FUN_140cd0df0]. dir 0 = X axis [INF].
+/// [OBS §9.9; dec_all.c FUN_140cd04e0, FUN_140cd0df0]. dir 0 = X axis [INF].
 fn dpi_2202(h: &mut Hidpp, dev: u8, index: u8, version: u8) -> Result<Dpi, Error> {
     if version >= 4 {
         // v4 drops the page byte (FUN_140cd07c0); not implemented until a device needs it.
@@ -494,24 +494,35 @@ fn dpi_2202(h: &mut Hidpp, dev: u8, index: u8, version: u8) -> Result<Dpi, Error
     }
     let caps = caps.ok_or(Error::BadReply("DPI range list never terminated"))?;
     let g = h.call(dev, index, 5, &[0], &[4])?;
-    need(&g, 10)?;
+    let (current, default, y, lod) = parse_2202_params(&g)?;
     Ok(Dpi {
         feature: 0x2202,
         index,
         version,
-        current: u16::from_be_bytes([g[1], g[2]]),
-        y: Some(u16::from_be_bytes([g[3], g[4]])),
-        default: u16::from_be_bytes([g[5], g[6]]),
-        lod: g[9],
+        current,
+        default,
+        y: Some(y),
+        lod,
         caps,
     })
 }
 
-/// Parameters for a DPI set. UNVERIFIED on hardware until logged in NOTES.md.
+/// 0x2202 f5 reply: [sensor, X BE16, defaultX BE16, Y BE16, defaultY BE16, lod].
+/// Returns (x, default x, y, lod). [HW SL2: after setting X=Y=1600 the reply was
+/// `00 06 40 03 20 06 40 03 20 02`]. This corrects the X, Y, defX, defY order implied by
+/// protocol.md §9.9; G HUB only shows four BE16 fields at bytes 1..9 (FUN_140cd0df0).
+pub fn parse_2202_params(g: &[u8]) -> Result<(u16, u16, u16, u8), Error> {
+    need(g, 10)?;
+    let be = |i: usize| u16::from_be_bytes([g[i], g[i + 1]]);
+    Ok((be(1), be(3), be(5), g[9]))
+}
+
+/// Parameters for a DPI set.
 /// - 0x2201 f3: [sensor, dpi BE16] (+ dpiLevel byte when feature version >= 2; meaning
-///   [UNK], 0 sent). [OBS �9.9; FUN_140ccf450]
+///   [UNK], 0 sent). [OBS §9.9; FUN_140ccf450] UNVERIFIED: no 0x2201 device available.
 /// - 0x2202 f6: [sensor, x BE16, y BE16, lod]; X and Y both set, LOD preserved.
-///   [OBS �9.9; FUN_140cd0ff0]
+///   [OBS §9.9; FUN_140cd0ff0] [HW SL2 wired, host mode: `11 FF 09 63 00 06 40 06 40 02`
+///   echoed, read-back 1600/1600, device event `11 FF 09 00 00 06 40 06 40 02`]
 pub fn set_dpi_params(d: &Dpi, dpi: u16) -> (u8, Vec<u8>) {
     let [hi, lo] = dpi.to_be_bytes();
     match d.feature {
@@ -534,7 +545,8 @@ pub fn set_dpi(h: &mut Hidpp, dev: u8, d: &Dpi, value: u16) -> Result<(), Error>
     h.call(dev, d.index, func, &params, extra)?;
     Ok(())
 }
-/// 0x8100 f2 get mode: 1 = onboard [OBS §9.9]; 2 = host [PUB libratbag].
+
+/// 0x8100 f2 get mode: 1 = onboard [OBS §9.9]; 2 = host [PUB libratbag] [HW SL2].
 pub fn onboard_mode(h: &mut Hidpp, dev: u8) -> Result<Option<u8>, Error> {
     let (i, _, _) = h.get_feature(dev, 0x8100)?;
     if i == 0 {
@@ -543,6 +555,27 @@ pub fn onboard_mode(h: &mut Hidpp, dev: u8) -> Result<Option<u8>, Error> {
     let p = h.call(dev, i, 2, &[], &[])?;
     need(&p, 1)?;
     Ok(Some(p[0]))
+}
+
+pub const MODE_ONBOARD: u8 = 1;
+pub const MODE_HOST: u8 = 2;
+
+/// 0x8100 f1 set mode `[mode]`: 1 = onboard, 2 = host. G HUB's SetOnboardMode(bool) sends
+/// exactly one byte computed as onboard ? 1 : 2. [OBS dec_all.c FUN_140d0e970] [PUB libratbag]
+/// [HW SL2 wired: `10 FF 0D 13 02` -> mode reads back 2; `10 FF 0D 13 01` -> back to 1].
+/// Whether host mode survives a power cycle is [UNK].
+pub fn set_onboard_mode(h: &mut Hidpp, dev: u8, mode: u8) -> Result<(), Error> {
+    let i = h.feature(dev, 0x8100)?;
+    h.call(dev, i, 1, &[mode], &[])?;
+    Ok(())
+}
+
+pub fn mode_name(m: u8) -> &'static str {
+    match m {
+        MODE_ONBOARD => "onboard",
+        MODE_HOST => "host",
+        _ => "?",
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +687,27 @@ mod tests {
             set_dpi_params(&dpi_of(0x2202, 0), 400),
             (6, vec![0, 0x01, 0x90, 0x01, 0x90, 2])
         );
+    }
+
+    #[test]
+    fn dpi_2202_params_layout_from_hw() {
+        // [HW] SL2 wired: before and after f6 [00 06 40 06 40 02]
+        assert_eq!(
+            parse_2202_params(&[0, 3, 0x20, 3, 0x20, 3, 0x20, 3, 0x20, 2]).unwrap(),
+            (800, 800, 800, 2)
+        );
+        let after = [
+            0, 0x06, 0x40, 0x03, 0x20, 0x06, 0x40, 0x03, 0x20, 0x02, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(parse_2202_params(&after).unwrap(), (1600, 800, 1600, 2));
+        assert!(parse_2202_params(&after[..9]).is_err());
+    }
+
+    #[test]
+    fn set_host_mode_request_bytes() {
+        // 0x8100 at index 0x0D on the SL2 [HW]; f1 [2] = host [OBS FUN_140d0e970]
+        let m = hidpp::build20(1, 0x0D, 1, 3, &[MODE_HOST]).unwrap();
+        assert_eq!(m, [0x10, 0x01, 0x0D, 0x13, 0x02, 0x00, 0x00]);
     }
 
     #[test]
