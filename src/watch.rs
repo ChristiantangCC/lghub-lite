@@ -18,7 +18,8 @@ use windows_sys::Win32::Foundation::SYSTEMTIME;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::System::Threading::INFINITE;
 
-use crate::audio::{self, Adc, Curve};
+use crate::audio::{self, Adc};
+use crate::battery::{self, Curve};
 use crate::config::{self, Preset};
 use crate::device::{self, Dpi, EVENT_FEATURES, Event};
 use crate::hid::{self, Notifier, Signal, Wake, Waker};
@@ -126,6 +127,8 @@ pub enum Cmd {
     SetDpi(u16),
     SetRate(u32),
     SetMode(u8),
+    /// Build or refine the measured battery curve from the voltage recording.
+    BuildCurve,
     /// Save the given values as this model's preset (None clears that field).
     SavePreset {
         dpi: Option<u16>,
@@ -142,8 +145,12 @@ pub struct Snapshot {
     pub battery_percent: Option<u8>,
     /// Battery voltage for devices that only report a voltage (0x1F20).
     pub voltage_mv: Option<u16>,
-    /// A voltage-only battery without a curve file: a percentage needs one.
+    /// A voltage-only battery whose percentage is only the generic estimate.
     pub needs_curve: bool,
+    /// Where the percentage comes from (voltage-only batteries).
+    pub curve_label: Option<String>,
+    /// State of the voltage recording that measured curves are built from.
+    pub recording: Option<String>,
     pub dpi: Option<Dpi>,
     /// (current Hz, allowed Hz)
     pub rate: Option<(u32, Vec<u32>)>,
@@ -160,7 +167,11 @@ struct Dev {
     feats: Vec<(u8, u16)>,
     /// Battery reported only as a voltage (0x1F20); read on a timer.
     has_voltage: bool,
+    model: u16,
+    /// Best curve for a voltage-only battery (always set for those).
     curve: Option<Curve>,
+    /// Lowest voltage since the last charge; a clear rise above it means charging.
+    low_mv: u16,
     /// What was last reported for the battery, to report only changes.
     last_battery: String,
 }
@@ -180,6 +191,11 @@ struct Live {
 }
 
 impl Live {
+    /// Folder of the preset file, which also holds battery curves and recordings.
+    fn dir(&self) -> PathBuf {
+        self.presets.parent().map(Path::to_path_buf).unwrap_or_default()
+    }
+
     fn sel(&self, index: u8) -> String {
         if index == DIRECT {
             format!("{:04x}", self.pid)
@@ -362,21 +378,16 @@ impl Monitor {
             .find(|d| d.index == i)
             .map(|d| d.name.clone())
             .unwrap_or_default();
-        // A curve file may have been added since the device attached (GUI import): look again.
-        if let Some(d) = l
-            .devs
-            .iter_mut()
-            .find(|d| d.index == i && d.has_voltage && d.curve.is_none())
-        {
-            let dir = l.presets.parent().map(Path::to_path_buf).unwrap_or_default();
-            d.curve = device::model_id(&mut l.h, i)
-                .ok()
-                .and_then(|m| audio::find_curve(&dir, m));
+        // A curve may have been imported or built since the last look: look again.
+        let dir = l.dir();
+        let (mut needs_curve, mut curve_label, mut recording) = (false, None, None);
+        if let Some(d) = l.devs.iter_mut().find(|d| d.index == i && d.has_voltage) {
+            let c = battery::find_curve(&dir, d.model);
+            needs_curve = c.is_approx();
+            curve_label = Some(c.label());
+            recording = Some(battery::recording_status(&dir, d.model));
+            d.curve = Some(c);
         }
-        let needs_curve = l
-            .devs
-            .iter()
-            .any(|d| d.index == i && d.has_voltage && d.curve.is_none());
         let (battery, battery_percent, voltage_mv) = battery_now(l, i);
         let dpi = optional(device::dpi(&mut l.h, i))?;
         let rate = optional(device::report_rate(&mut l.h, i))?.map(|r| {
@@ -402,6 +413,8 @@ impl Monitor {
             battery_percent,
             voltage_mv,
             needs_curve,
+            curve_label,
+            recording,
             dpi,
             rate,
             mode,
@@ -416,6 +429,22 @@ impl Monitor {
             let (l, i) = self.find(sel)?;
             match &cmd {
                 Cmd::Refresh => {}
+                Cmd::BuildCurve => {
+                    let dir = l.dir();
+                    let d = l
+                        .devs
+                        .iter_mut()
+                        .find(|d| d.index == i && d.has_voltage)
+                        .ok_or_else(|| Error::Other("this device reports no battery voltage".into()))?;
+                    match battery::update_measured(&dir, d.model).map_err(Error::Other)? {
+                        Some(c) => d.curve = Some(c),
+                        None => {
+                            return Err(Error::Other(
+                                "the measured curve already includes the latest recorded discharge".into(),
+                            ));
+                        }
+                    }
+                }
                 Cmd::SetDpi(v) => {
                     device::set_dpi_verified(&mut l.h, i, *v)?;
                 }
@@ -465,15 +494,18 @@ fn removed(l: &Live, reason: Option<String>) -> Update {
 /// Battery text, percent and (for voltage-only batteries) millivolts for a device:
 /// 0x1004/0x1000/0x1001, or 0x1F20 with a curve.
 fn battery_now(l: &mut Live, index: u8) -> (Option<String>, Option<u8>, Option<u16>) {
-    let d = l.devs.iter().find(|d| d.index == index);
-    if d.is_some_and(|d| d.has_voltage) {
-        let curve = d.and_then(|d| d.curve.as_ref());
+    if l.devs.iter().any(|d| d.index == index && d.has_voltage) {
         return match audio::adc(&mut l.h, index) {
-            Ok(a) => (
-                Some(audio::voltage_text(&a, curve)),
-                curve.map(|c| c.percent(a.mv)),
-                Some(a.mv),
-            ),
+            Ok(a) => {
+                let mut ignored = Vec::new();
+                report_voltage(l, index, &a, &mut ignored);
+                let c = l.devs.iter().find(|d| d.index == index).and_then(|d| d.curve.as_ref());
+                (
+                    c.map(|c| audio::voltage_text(&a, c)),
+                    c.map(|c| c.percent(a.mv)),
+                    Some(a.mv),
+                )
+            }
             Err(e) => (Some(format!("unreadable: {e}")), None, None),
         };
     }
@@ -565,21 +597,29 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
         name: name.clone(),
         feats,
         has_voltage,
+        model: 0,
         curve: None,
+        low_mv: u16::MAX,
         last_battery: String::new(),
     };
     let (battery, battery_percent) = if has_voltage {
-        let dir = l.presets.parent().map(Path::to_path_buf).unwrap_or_default();
-        dev.curve = device::model_id(&mut l.h, index)
-            .ok()
-            .and_then(|m| audio::find_curve(&dir, m));
+        let dir = l.dir();
+        dev.model = device::model_id(&mut l.h, index).unwrap_or(l.pid);
+        // A discharge may have ended while nothing was running: build from it first.
+        match battery::update_measured(&dir, dev.model) {
+            Ok(Some(_)) => out.push(Update::Line(format!(
+                "  {sel:<8} battery curve updated from the recorded discharge"
+            ))),
+            Ok(None) => {}
+            Err(e) => crate::verbose(format_args!("{sel}: no new measured curve: {e}")),
+        }
+        dev.curve = Some(battery::find_curve(&dir, dev.model));
         match audio::adc(&mut l.h, index) {
             Ok(a) => {
-                dev.last_battery = battery_key(&a, dev.curve.as_ref());
-                (
-                    Some(audio::voltage_text(&a, dev.curve.as_ref())),
-                    dev.curve.as_ref().map(|c| c.percent(a.mv)),
-                )
+                learn(&dir, &mut dev, &a, &sel, out);
+                let c = dev.curve.as_ref().expect("set above");
+                dev.last_battery = battery_key(&a, Some(c));
+                (Some(audio::voltage_text(&a, c)), Some(c.percent(a.mv)))
             }
             Err(e) => (Some(format!("unreadable: {e}")), None),
         }
@@ -679,20 +719,47 @@ fn battery_key(a: &Adc, curve: Option<&Curve>) -> String {
     }
 }
 
-/// Report a voltage reading if it changed what the user sees.
+/// Record a voltage reading and report it if it changed what the user sees.
 fn report_voltage(l: &mut Live, index: u8, a: &Adc, out: &mut Vec<Update>) {
     let sel = l.sel(index);
+    let dir = l.dir();
     let Some(d) = l.devs.iter_mut().find(|d| d.index == index) else {
         return;
     };
+    learn(&dir, d, a, &sel, out);
     let key = battery_key(a, d.curve.as_ref());
-    if key != d.last_battery {
+    if key != d.last_battery
+        && let Some(c) = &d.curve
+    {
         d.last_battery = key;
         out.push(Update::Battery {
             sel,
-            text: audio::voltage_text(a, d.curve.as_ref()),
-            percent: d.curve.as_ref().map(|c| c.percent(a.mv)),
+            text: audio::voltage_text(a, c),
+            percent: Some(c.percent(a.mv)),
         });
+    }
+}
+
+/// Add the reading to the voltage recording. When charging starts after a discharge (a clear
+/// rise over the lowest voltage seen), build or refine the measured curve from the recording.
+fn learn(dir: &Path, d: &mut Dev, a: &Adc, sel: &str, out: &mut Vec<Update>) {
+    if let Err(e) = battery::record(dir, d.model, a.mv, a.flags) {
+        crate::verbose(format_args!("{sel}: voltage recording failed: {e}"));
+    }
+    if d.low_mv != u16::MAX && a.mv > d.low_mv.saturating_add(battery::CHARGE_RISE_MV) {
+        d.low_mv = a.mv;
+        match battery::update_measured(dir, d.model) {
+            Ok(Some(c)) => {
+                out.push(Update::Line(format!(
+                    "  {sel:<8} battery curve updated from the recorded discharge"
+                )));
+                d.curve = Some(c);
+            }
+            Ok(None) => {}
+            Err(e) => crate::verbose(format_args!("{sel}: no new measured curve: {e}")),
+        }
+    } else {
+        d.low_mv = d.low_mv.min(a.mv);
     }
 }
 

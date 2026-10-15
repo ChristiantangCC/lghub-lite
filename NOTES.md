@@ -66,8 +66,9 @@ A Cargo workspace: the core package (one library plus two thin binaries; no trai
 - `src/device.rs` verified writes: `set_dpi_verified`, `set_rate_verified`, `set_mode_verified`, `explain_refusal`, shared by the CLI and GUI.
 - `src/config.rs`: preset file parse/format, apply, and `write_atomic` (write `<file>.tmp`, then rename), shared by presets and dumps.
 - `src/profiles.rs`: onboard memory read path (0x8100 f0/f4/f5/f10), CRC-CCITT, directory parsing, dump format.
-- `src/audio.rs`: headset features 0x1F20 (battery voltage, user-supplied curve in fixed-point integers) and 0x8310 (EQ read).
-- `dev/` (not part of the app): `agent.ps1` (GET-only G HUB agent client) and `calibrate.ps1` (logs lghub-lite vs G HUB battery readings to `%APPDATA%\lghub-liteattery-calibration.csv`).
+- `src/audio.rs`: headset features 0x1F20 (battery voltage) and 0x8310 (EQ read).
+- `src/battery.rs`: voltage-to-percent curves (measured / G HUB file / built-in / generic estimate), the voltage recording and the curve builder, all in fixed-point integers.
+- `dev/` (not part of the app): `agent.ps1` (GET-only G HUB agent client) and `calibrate.ps1` (logs lghub-lite vs G HUB battery readings to `%APPDATA%\lghub-lite\battery-calibration.csv`).
 
 **Threads.** Our code runs on one thread. Windows runs the `CM_Register_Notification` callback on a thread-pool thread. The callback only calls `SetEvent`, and the main thread waits on that event; no window or message loop is needed. While idle the process has 1 thread [HW, see §8].
 
@@ -234,6 +235,13 @@ The function layouts were read from G HUB's request code with Rizin, against the
   - **Hours left** = remaining mAh / summed block current (53 mA here). Matches G HUB's `mileage` (18.8 h vs 18.7 h) and `maxLifeSpan` (1271 / 53 = 23.98 h).
   - Real files have 1 mV wiggles, so only mAh must be non-decreasing and the voltage must fall overall.
   - **Charging is not handled yet.** The `<charging>` tables are ignored, and while charging the voltage reads high, so the % is overstated. The 0x1F20 flag bits that indicate charging are [UNK]; this needs a reading while plugged in (TEST REQUEST 9).
+- **Battery percentage without G HUB: own measured curve** (human decision, 2026-10-16; `src/battery.rs`).
+  - **Order of sources:** `curve-<model>.txt` (our own measurement) → a G HUB XML the user copied → a built-in measured table (empty until a measured curve is contributed) → a generic single-cell Li-ion table [PUB], always shown as `≈` and labelled "generic Li-ion estimate".
+  - **Recording:** every 0x1F20 reading taken by the `Monitor` (attach, the 5-min poll, GUI refresh) is appended as `unix_time,mV,flags` to `voltage-<model>.csv` in the preset folder; over 2 MB it moves to `.csv.old`. The CLI one-shot `battery` does not record.
+  - **Builder:** splits the recording into discharges at any rise of more than 60 mV over the running minimum (charging); takes the newest one that starts at ≥ 4000 mV and reaches ≤ 3550 mV, with ≥ 1 h of use and ≥ 20 readings. Use time = sum of gaps ≤ 15 min (longer gaps = headset off or PC asleep). For each 10 mV step the remaining permille = use time still ahead when the voltage first reached that step / total use time; then made non-increasing. Runtime = total use time. This assumes roughly constant draw [INF], which is also how the G HUB file's rows are spaced (constant 53 mA).
+  - **Refinement:** a newer discharge is averaged with the saved curve (per voltage step and runtime), so ageing is followed gradually. Triggered automatically on the charging rise, on attach (a discharge may have ended while nothing ran), or by the GUI button / `curve <dev> build`.
+  - [HW 2026-10-16] At 3850 mV: G HUB file 71 %, ~17.1 h; generic estimate ≈50 %. The generic table is resting-voltage data and the headset reads lower under load, so it under-reports by ~20 points mid-range. Not tuned against Logitech's numbers on purpose (that would be copying their curve); the measured curve is the fix.
+  - The G HUB file shows this headset running down to 3.29 V before it stops (1312 min), so the 3550 mV "empty" threshold is reached in normal use.
 - **No unsolicited 0x1F20 events** in ~3.5 min of capture with G HUB running. Only G HUB's own reads (`11 FF 06 0D …`, swid 0x0D, about once a minute) were seen.
   - 0x1F20 f3 config read returns `01 01` [HW]. Its meaning is [INF]: possibly "reporting enabled", but no event arrived.
   - So `watch` reads the voltage itself every **5 minutes**. This is the only timer in the program, justified because battery changes over hours and G HUB itself polls every ~60 s. It prints only when the percentage (or, without a curve, the 10 mV step) changes.
@@ -324,6 +332,12 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 - Close the window: the tray icon remains and its tooltip shows battery. Left-click it: the window returns. Tray menu **Quit**: the app exits.
 - Tick **Start at login**, check that `lghub-lite autostart` shows the GUI entry, then untick it.
 
+**TEST REQUEST 11: measured headset curve.** Needs one full discharge, no G HUB.
+- Charge the headset fully, then use it with the app (or `lghub-lite-bg`) running until it is nearly empty or switches off, then plug it in to charge with the app still running.
+- Expected: the event log shows "battery curve updated from the recorded discharge"; `lghub-lite curve 0aba` shows "your measured curve" and a full runtime (G HUB's file says ~24 h at its assumed draw).
+- To compare: move the G HUB XML out of `%APPDATA%\lghub-lite\` first, otherwise the measured curve still wins, and compare `battery 0aba` with and without it at a few charge levels.
+- Please keep `curve-0aba.txt`: it can become the built-in curve for this headset.
+
 **TEST REQUEST 7: headset sidetone is audible.** (Command removed.) ❌ Failed on 2026-10-15: set 50 (read-back 50), human heard nothing; restored 0. Possible causes [INF]: a different value scale; or the effective sidetone being the USB-audio mixer control that G HUB's audio side uses rather than HID++ 0x8300. Open. G HUB can stay open.
 - Commands: put the headset on, then `lghub-lite sidetone 0aba 50`, speak, then `lghub-lite sidetone 0aba 0`.
 - What to observe: at 50 you hear your own voice in the headset; at 0 you don't.
@@ -334,7 +348,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 **TEST REQUEST 8: battery calibration** (now only a cross-check of the curve against G HUB; optional).
 - Command: `powershell -File dev\calibrate.ps1` from the repo folder, with the headset **not charging**.
 - When: run it at several charge levels, for example full, ~60 %, ~30 % and ~10 %.
-- Each run appends a point that tightens the estimate in `src/audio.rs`.
+- Each run appends one lghub-lite vs G HUB comparison point.
 
 **TEST REQUEST 6: presets applied on reconnect.** G HUB can stay open.
 - Commands:
@@ -372,8 +386,8 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` | **288,768 B** (Monitor refactor and verified-write helpers: +4.6 KB) |
-| `lghub-lite-bg.exe` | **229,376 B** |
+| `lghub-lite.exe` | **311,296 B** (measured battery curves, recording, `curve` command: +22.5 KB) |
+| `lghub-lite-bg.exe` | **249,856 B** (+20.5 KB, same cause) |
 | `lghub-lite-gui.exe` | **4,397,056 B** (eframe/glow + tray-icon) |
 | Crates | core: 3 (`lghub-lite`, `windows-sys`, `windows-link`), unchanged; GUI package: 122 |
 | `devices` wall time | median 115 ms (10 runs; headset + receiver, includes HID++ round trips) |
@@ -389,6 +403,8 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 - 259,072 B with headset features;
 - about 309 KB with the battery curve in floats (not measured at the time; reconstructed);
 - **392 KB** with autostart via `std::process::Command`, too much, so it was replaced by `CreateProcessW` + Toolhelp: 318 KB;
-- floats replaced by fixed-point integers: **284 KB**.
+- floats replaced by fixed-point integers: **284 KB**;
+- 288,768 B with the Monitor refactor;
+- **311,296 B** with measured battery curves (2026-10-16).
 
 The `autostart` command itself costs ~6 KB.

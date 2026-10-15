@@ -17,7 +17,7 @@ usually be listed and readable, but writes are only verified where marked.
 | Device | Connection | What works |
 |---|---|---|
 | PRO X SUPERLIGHT 2 | LIGHTSPEED receiver, USB cable | list, info, battery, DPI read/write, report rate read/write, onboard mode, presets, connect/disconnect events, onboard memory read/backup |
-| PRO X Wireless headset | its USB dongle | list, info, battery voltage (percentage with a curve file, see below), equalizer (read-only) |
+| PRO X Wireless headset | its USB dongle | list, info, battery percentage from the voltage (estimated until a discharge is measured, see below), equalizer (read-only) |
 
 Have a different device? Run `lghub-lite devices` and `lghub-lite info <dev>` and open a
 [device report](../../issues/new?template=device-report.md). That is how the table grows.
@@ -117,16 +117,33 @@ CPU while nothing happens. The background watcher writes the same lines to
 ### Headset battery percentage
 
 Headsets like the PRO X Wireless only report a battery **voltage**, and the voltage-to-percent
-curve is not linear. lghub-lite does not ship Logitech's curve data. If you have (or had)
-G HUB installed, copy your own copy of the curve file into the lghub-lite folder:
+curve is not linear. lghub-lite turns the voltage into a percentage with the best curve it has,
+in this order:
 
-```powershell
-Copy-Item "C:\ProgramData\LGHUB\depots\*\pro_headset\pro_x_wireless_headset_battery.xml" "$env:APPDATA\lghub-lite\"
-```
+1. **Your own measured curve.** While the app, `watch` or the background watcher runs, every
+   headset voltage reading is added to `%APPDATA%\lghub-lite\voltage-<model>.csv`. Once that
+   recording holds one full discharge (from full, 4.0 V or more, down to nearly empty, 3.55 V
+   or less) and the headset starts charging again, lghub-lite builds `curve-<model>.txt` from
+   it: the percentage left is the share of the measured use time still ahead, and the time
+   left comes from the measured runtime. Each later full discharge is averaged in, so the curve
+   follows the battery as it ages. Time with the headset off or the PC asleep is not counted.
+   The app's **Build from recording** button and `lghub-lite curve <dev> build` do the same
+   on demand.
+2. **A G HUB curve file**, if you have G HUB installed (or had it): copy your own copy into
+   the lghub-lite folder, or use **Import from G HUB** in the app. It is never bundled.
 
-Then `lghub-lite battery 0aba` shows the percentage and hours left, matching G HUB. Without the
-file it shows the voltage. While the headset is charging the percentage is too high (charging
-is not detected yet).
+   ```powershell
+   Copy-Item "C:\ProgramData\LGHUB\depots\*\pro_headset\pro_x_wireless_headset_battery.xml" "$env:APPDATA\lghub-lite\"
+   ```
+3. **A generic Li-ion estimate**, shown as `≈`. It reads low under load (about 20 points
+   below G HUB's figure on the PRO X Wireless at 3.85 V), so treat it as a rough guide until
+   your own discharge has been recorded.
+
+`lghub-lite curve <dev>` shows which curve is used and how far the recording has got. While
+the headset is charging the percentage is too high (charging is not detected yet).
+
+A measured `curve-<model>.txt` is your own data, so you can share it: attach it to a
+[device report](../../issues/new?template=device-report.md) and it can ship built in for others.
 
 ## All commands
 
@@ -143,6 +160,7 @@ is not detected yet).
 | `apply <dev>` | Apply the saved preset now |
 | `watch` | Print device and setting events until Ctrl+C |
 | `autostart [on\|off]` | Run the background watcher at login, or stop it |
+| `curve <dev> [build]` | Show the headset battery curve and recording; `build` makes or refines the measured curve |
 | `eq <dev>` | Show a headset's hardware equalizer (read-only) |
 | `profiles <dev>` | Onboard profile memory overview (read-only) |
 | `dump <dev> <file>` | Back up all onboard memory to a text file (read-only) |
@@ -150,8 +168,8 @@ is not detected yet).
 | `raw <dev> <hex…> --allow-raw` | Send one raw HID++ report (debugging, use with care) |
 
 Options: `--trace` prints every report sent and received; `--verbose` prints extra
-diagnostics; `--config FILE` uses another preset file (curve files and logs live in its
-folder).
+diagnostics; `--config FILE` uses another preset file (curve files, voltage recordings and
+logs live in its folder).
 
 ## What it does not do
 

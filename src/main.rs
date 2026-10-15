@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use lghub_lite::device::parse_selector;
 use lghub_lite::hidpp::{self, DIRECT, Error, Hidpp};
-use lghub_lite::{LOGITECH_VID, audio, autostart, config, device, hid, profiles, verbose, watch};
+use lghub_lite::{LOGITECH_VID, audio, autostart, battery, config, device, hid, profiles, verbose, watch};
 
 const USAGE: &str = "\
 lghub-lite: control Logitech HID++ mice and headsets without G HUB.
@@ -22,8 +22,9 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   profiles <dev>           onboard profile memory: info, active profile, directories, CRCs
   dump <dev> <file>        read every onboard memory sector into a text backup file
   info <dev>               identity, firmware and supported features
-  battery <dev>            battery state (headsets: voltage; percentage needs a power-model
-                           XML copied from your own G HUB install into the preset folder)
+  battery <dev>            battery state (headsets: percentage from the voltage and a curve)
+  curve <dev> [build]      headset battery curve in use and the voltage recording; `build`
+                           makes or refines your measured curve from a recorded discharge
   eq <dev>                 show the headset hardware equalizer (read-only)
   dpi <dev> [value]        read DPI, or set it and read it back
   rate <dev> [hz]          read report rate, or set it and read it back
@@ -49,7 +50,7 @@ impl Opts {
             .ok_or_else(|| Error::Other("APPDATA is not set; pass --config FILE".into()))
     }
 
-    /// Folder holding the preset file; battery curve XMLs are looked up here too.
+    /// Folder holding the preset file; battery curves and recordings live here too.
     fn curve_dir(&self) -> Result<PathBuf, Error> {
         let p = self.config_path()?;
         Ok(p.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")))
@@ -105,6 +106,10 @@ fn main() {
         ["battery", d] => {
             let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
             with_dev(&opts, d, |h, dev| battery(h, dev, &dir))
+        }
+        ["curve", d, rest @ ..] if rest.len() <= 1 && rest.iter().all(|r| *r == "build") => {
+            let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
+            with_dev(&opts, d, |h, dev| curve(h, dev, &dir, !rest.is_empty()))
         }
         ["eq", d] => with_dev(&opts, d, eq),
         ["dpi", d] => with_dev(&opts, d, |h, dev| dpi(h, dev, None)),
@@ -506,10 +511,35 @@ fn dump(h: &mut Hidpp, dev: u8, file: &std::path::Path) -> Result<(), Error> {
 fn battery(h: &mut Hidpp, dev: u8, curve_dir: &std::path::Path) -> Result<(), Error> {
     let line = audio::battery_text(h, dev, curve_dir)?;
     println!("{line}");
-    if line.contains("no battery curve") {
+    if line.starts_with('≈') {
+        println!("hint       this is a generic estimate; see `lghub-lite curve <dev>` for a measured one");
+    }
+    Ok(())
+}
+
+/// `curve <dev> [build]`: which battery curve is used, the recording, and building from it.
+fn curve(h: &mut Hidpp, dev: u8, dir: &std::path::Path, build: bool) -> Result<(), Error> {
+    audio::adc(h, dev)?; // only voltage-reporting devices have curves
+    let model = device::model_id(h, dev)?;
+    if build {
+        match battery::update_measured(dir, model).map_err(Error::Other)? {
+            Some(_) => println!("built      {}", dir.join(format!("curve-{model:04x}.txt")).display()),
+            None => println!("unchanged  the measured curve already includes the latest recorded discharge"),
+        }
+    }
+    let c = battery::find_curve(dir, model);
+    let runtime = c
+        .runtime_tenths
+        .map(|t| format!(", full runtime ~{}.{} h", t / 10, t % 10))
+        .unwrap_or_default();
+    println!("curve      {}{runtime}", c.label());
+    println!("recording  {}", battery::recording_status(dir, model));
+    println!("folder     {}", dir.display());
+    if c.is_approx() {
         println!(
-            "hint       for a percentage, copy your G HUB power model (e.g. C:\\ProgramData\\LGHUB\\depots\\<n>\\pro_headset\\pro_x_wireless_headset_battery.xml) into {}",
-            curve_dir.display()
+            "hint       keep `watch`, the background watcher or the app running while the headset goes\n           from full (>= {} mV) to nearly empty (<= {} mV); the curve is built when it charges again",
+            battery::FULL_MV,
+            battery::EMPTY_MV
         );
     }
     Ok(())

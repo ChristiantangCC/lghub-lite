@@ -18,7 +18,7 @@ use eframe::egui;
 use lghub_lite::device::{Event, MODE_HOST, MODE_ONBOARD};
 use lghub_lite::hid::Waker;
 use lghub_lite::watch::{self, Cmd, Monitor, Snapshot, Update};
-use lghub_lite::{audio, autostart, config, hidpp};
+use lghub_lite::{autostart, battery, config, hidpp};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -351,7 +351,7 @@ impl eframe::App for App {
                                 && let Some(m) = s.model
                                 && self.ghub_curve.as_ref().is_none_or(|g| g.0 != m)
                             {
-                                self.ghub_curve = Some((m, audio::find_ghub_curve(m)));
+                                self.ghub_curve = Some((m, battery::find_ghub_curve(m)));
                             }
                             if let Some(row) = self.rows.iter_mut().find(|r| r.sel == sel) {
                                 row.battery = s.battery.clone();
@@ -463,37 +463,14 @@ impl App {
 
         // Battery
         let mut import: Option<PathBuf> = None;
-        if s.needs_curve {
-            if let Some(mv) = s.voltage_mv {
-                ui.label(egui::RichText::new(format!("Battery: {}.{:02} V", mv / 1000, mv % 1000 / 10)).strong());
-            }
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label("This headset only reports its battery voltage. To show a percentage and time left, lghub-lite needs Logitech's battery curve file for it.");
-                ui.horizontal(|ui| {
-                    match self.ghub_curve.as_ref().and_then(|g| g.1.clone()) {
-                        Some(src) => {
-                            if ui.button("Import from G HUB").on_hover_text(src.display().to_string()).clicked() {
-                                import = Some(src);
-                            }
-                        }
-                        None => {
-                            ui.weak("Not found in a G HUB install on this PC; see the README.");
-                        }
-                    }
-                    if ui.button("Open folder").on_hover_text(self.curve_dir.display().to_string()).clicked() {
-                        let _ = std::fs::create_dir_all(&self.curve_dir);
-                        let _ = std::process::Command::new("explorer").arg(&self.curve_dir).spawn();
-                    }
-                });
-            });
-        }
+        let mut cmd: Option<Cmd> = None;
         match (s.battery_percent, &s.battery) {
-            (None, Some(_)) if s.needs_curve => {}
             (Some(p), text) => {
                 let detail = text.as_deref().unwrap_or("");
+                let approx = if s.needs_curve { "≈ " } else { "" };
                 ui.add(
                     egui::ProgressBar::new(p as f32 / 100.0)
-                        .text(format!("{p}%"))
+                        .text(format!("{approx}{p}%"))
                         .desired_width(260.0),
                 );
                 ui.weak(detail);
@@ -503,9 +480,43 @@ impl App {
             }
             (None, None) => {}
         }
+        if let Some(label) = &s.curve_label {
+            egui::CollapsingHeader::new("Battery curve")
+                .default_open(s.needs_curve)
+                .show(ui, |ui| {
+                    ui.label(format!("Percentage from: {label}."));
+                    if s.needs_curve {
+                        ui.label("This headset only reports its voltage, so for now the percentage is a generic estimate. lghub-lite records the voltage while it runs; after one full discharge (from full to nearly empty, then charging) it builds a curve measured on your own headset and uses that instead. Every later full discharge refines it.");
+                    }
+                    if let Some(r) = &s.recording {
+                        ui.weak(format!("Recording: {r}"));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Build from recording")
+                            .on_hover_text("Build or refine the measured curve now (also happens on its own when the headset starts charging)")
+                            .clicked()
+                        {
+                            cmd = Some(Cmd::BuildCurve);
+                        }
+                        if s.needs_curve
+                            && let Some(src) = self.ghub_curve.as_ref().and_then(|g| g.1.clone())
+                            && ui
+                                .button("Import from G HUB")
+                                .on_hover_text(src.display().to_string())
+                                .clicked()
+                        {
+                            import = Some(src);
+                        }
+                        if ui.button("Open folder").on_hover_text(self.curve_dir.display().to_string()).clicked() {
+                            let _ = std::fs::create_dir_all(&self.curve_dir);
+                            let _ = std::process::Command::new("explorer").arg(&self.curve_dir).spawn();
+                        }
+                    });
+                });
+        }
         ui.add_space(8.0);
 
-        let mut cmd: Option<Cmd> = None;
         let onboard = s.mode == Some(MODE_ONBOARD);
         egui::Grid::new("settings")
             .num_columns(2)
@@ -601,7 +612,7 @@ impl App {
             self.send(&sel, c);
         }
         if let Some(src) = import {
-            match audio::import_curve(&src, &self.curve_dir) {
+            match battery::import_curve(&src, &self.curve_dir) {
                 Ok(dest) => {
                     self.message = Some((false, format!("Imported {}", dest.display())));
                     self.ghub_curve = None;
