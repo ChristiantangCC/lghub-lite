@@ -1,5 +1,5 @@
 # Dev-only, read-only G HUB agent client. Not part of the crate.
-# Usage: powershell -File tools/agent.ps1 /devices/list [outfile]
+# Usage: powershell -File dev/agent.ps1 /devices/list [outfile]
 # Only GET is allowed; the agent is a research oracle, never a dependency.
 param([Parameter(Mandatory)][string]$Path, [string]$Out)
 

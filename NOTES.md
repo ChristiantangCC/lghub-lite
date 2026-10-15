@@ -1,7 +1,15 @@
 # lghub-lite — engineering log
 
 Minimal Rust CLI that talks HID++ directly to Logitech hardware on Windows. No G HUB dependency at runtime.
-Research docs live one level up: [`../protocol.md`](../protocol.md) (cited as §N) and `../reference/`.
+Not affiliated with or endorsed by Logitech. User-facing documentation is in [README.md](README.md); this file is the developer's engineering log.
+
+**How this was figured out.** Behaviour was learned for interoperability from three sources:
+- Logitech G HUB's own device layer, examined statically; addresses such as `FUN_140ccee80` or `0x140d26650` refer to functions in `lghub_agent.exe` (SHA-256 `04c1f3e8…`, G HUB 2023.1);
+- public HID++ knowledge (Solaar, libratbag);
+- tests on real hardware.
+
+Only facts needed for interoperability (IDs, byte layouts, sequences) are recorded here, in our own words; no Logitech code or data files are included. `§N` citations refer to the author's private research notes (`protocol.md`), which are **not published** because they contain material derived from decompiled software.
+
 Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), `[INF]` inferred, `[UNK]` unknown, `[HW]` verified on hardware here.
 
 ## 1. Status
@@ -17,7 +25,6 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `devices` | ✅ direct devices, receivers, and paired slots with online state |
 | `info <dev>` | ✅ protocol version, name, type, firmware entities, full feature table |
 | `battery <dev>` | ✅ SL2 via 0x1004 (receiver and cable). ✅ Headset via 0x1F20: voltage, plus **percentage and hours left from a user-supplied power-model XML** (matches G HUB: 78 % / 18.8 h vs 78 % / 18.7 h). Without the file, voltage only |
-| `sidetone <dev> [0-100]` | ⚠️ headset 0x8300 read/write with read-back works, but **no audible effect at 50** (human test 2026-10-15). Real control path unknown |
 | `eq <dev>` | ✅ headset 0x8310 hardware EQ, **read-only** (10 bands, ±12 dB). Writing is not supported; see §2 Headset |
 | `dpi <dev> [v]` | ✅ read via 0x2201/0x2202. ✅ write via 0x2202 with read-back in host mode, over the cable and the receiver. 0x2201 write is unverified (no device) |
 | `rate <dev> [hz]` | ✅ 0x8061 read/write with read-back in host mode, over the cable and the receiver. The Hz mapping is [PUB] and unmeasured |
@@ -25,6 +32,9 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `watch` | ✅ event-driven monitor: device arrival/removal, receiver slot connect/disconnect (incl. sleep/wake), DPI/rate/battery events. Headset battery (0x1F20) is read every 5 min and printed only when the % changes, the one timer in the program (see Headset). Idle CPU 0, one thread between reads. Human-run hot-plug test passed (TEST REQUEST 5) |
 | `preset <dev> [dpi=N] [rate=HZ] \| clear`, `presets`, `apply <dev>` | ✅ per-model presets in `%APPDATA%\lghub-lite\presets.txt` (`--config` overrides). `apply` and `watch` switch to host mode and set DPI/rate with read-back (SL2 over the receiver) |
 | `profiles <dev>`, `dump <dev> <file>` | ✅ read-only 0x8100 onboard memory: info, active profile, user/factory directories, per-sector CRC status, full text backup (atomic write). Nothing is written to the device. SL2 backup saved at `%APPDATA%\lghub-lite\onboard-backup-40a9-2026-10-15.txt` |
+| `autostart [on\|off]` | ✅ per-user login entry (HKCU `Run` value `lghub-lite`) for `lghub-lite-bg.exe`; `on` also starts it, `off` also stops it [HW: on → running, second copy exits, log written; off → entry removed, process ended] |
+| `lghub-lite-bg.exe` | ✅ windowless `watch` (single instance via the `Local\lghub-lite-bg` mutex), output with timestamps in `watch.log` next to the preset file, moved to `watch.log.old` at start-up once over 1 MB |
+| sidetone | ❌ removed: 0x8300 level reads and writes back, but a human heard no effect at 50 (2026-10-15). Facts are kept in §2 Headset |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
 
@@ -33,7 +43,11 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 ## 2. Protocol facts used by the code
 
 ### Architecture
-Single binary crate, no traits, no async:
+One library plus two thin binaries; no traits, no async:
+- `src/lib.rs`: module list, `verbose`, the Logitech VID.
+- `src/main.rs`: the `lghub-lite` CLI (argument parsing and output).
+- `src/bin/bg.rs`: `lghub-lite-bg`, the windowless watcher. Built with `windows_subsystem = "windows"`; routes stdout/stderr into the log with `SetStdHandle` (std looks the handle up on every write).
+- `src/autostart.rs`: HKCU `Run` value, plus starting (`CreateProcessW`) and stopping (Toolhelp + `TerminateProcess`) the watcher. `std::process::Command` was avoided: it added ~74 KB.
 - `src/hid.rs`: SetupDi enumeration, HidP caps, CreateFileW (shared R/W, overlapped).
   - One persistent overlapped read per collection, cancelled and drained on drop.
   - `wait_any` is a single `WaitForMultipleObjects` over all collections plus an optional extra event.
@@ -43,9 +57,8 @@ Single binary crate, no traits, no async:
 - `src/watch.rs`: the `watch` loop; applies presets on every attach.
 - `src/config.rs`: preset file parse/format, apply, and `write_atomic` (write `<file>.tmp`, then rename), shared by presets and dumps.
 - `src/profiles.rs`: onboard memory read path (0x8100 f0/f4/f5/f10), CRC-CCITT, directory parsing, dump format.
-- `src/audio.rs`: headset features 0x1F20 (battery voltage + estimate), 0x8300 (sidetone), 0x8310 (EQ read).
-- `tools/calibrate.ps1` (dev-only): records `(voltage, G HUB %)` pairs into `tools/battery-calibration.csv` via the GET-only agent client.
-- `src/main.rs`: argument parsing and output.
+- `src/audio.rs`: headset features 0x1F20 (battery voltage, user-supplied curve in fixed-point integers) and 0x8310 (EQ read).
+- `dev/` (not part of the app): `agent.ps1` (GET-only G HUB agent client) and `calibrate.ps1` (logs lghub-lite vs G HUB battery readings to `%APPDATA%\lghub-liteattery-calibration.csv`).
 
 **Threads.** Our code runs on one thread. Windows runs the `CM_Register_Notification` callback on a thread-pool thread. The callback only calls `SetEvent`, and the main thread waits on that event; no window or message loop is needed. While idle the process has 1 thread [HW, see §8].
 
@@ -252,7 +265,7 @@ The function layouts were read from G HUB's request code with Rizin, against the
 
 **Rejected `hidapi`:** it builds C via `cc`, hides share mode and overlapped timeout control, and has no hot-plug API.
 
-No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `tools/agent.ps1` (PowerShell, GET-only agent client, not part of the crate).
+No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `dev/agent.ps1` (PowerShell, GET-only agent client, not part of the crate).
 
 ## 5. Tests run
 | Date | Device | Connection | Test | Result |
@@ -274,7 +287,7 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
 | 2026-10-15 | headset 0aba | USB (own dongle) | human copied the power-model XML into %APPDATA%\lghub-lite; `battery 0aba` | ✅ percentage shown (human-confirmed); our test copy: 78 % / 18.8 h vs G HUB 78 % / 18.7 h; watch printed the 78 → 77 % drop from its 5-min read |
 | 2026-10-15 | headset 0aba | USB (own dongle) | 0x1F20 battery, 0x8300 sidetone read + write 30 → read-back → 0, 0x8310 EQ read + write attempt | ✅ 3919 mV vs G HUB 80 %; sidetone write/read-back ok; EQ read ok; EQ write refused (InvalidArgument, unchanged) → write removed |
-| — | — | — | `cargo test`: 35 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
+| — | — | — | `cargo test`: 36 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
 All tests ran with G HUB running. G HUB does not manage the SL2.
 
@@ -293,15 +306,15 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 
 TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on 2026-10-15; see §5.
 
-**TEST REQUEST 7: headset sidetone is audible.** ❌ Failed on 2026-10-15: set 50 (read-back 50), human heard nothing; restored 0. Possible causes [INF]: a different value scale; or the effective sidetone being the USB-audio mixer control that G HUB's audio side uses rather than HID++ 0x8300. Open. G HUB can stay open.
+**TEST REQUEST 7: headset sidetone is audible.** (Command removed.) ❌ Failed on 2026-10-15: set 50 (read-back 50), human heard nothing; restored 0. Possible causes [INF]: a different value scale; or the effective sidetone being the USB-audio mixer control that G HUB's audio side uses rather than HID++ 0x8300. Open. G HUB can stay open.
 - Commands: put the headset on, then `lghub-lite sidetone 0aba 50`, speak, then `lghub-lite sidetone 0aba 0`.
 - What to observe: at 50 you hear your own voice in the headset; at 0 you don't.
 - Also report whether G HUB later puts it back to 0 by itself.
 
-**TEST REQUEST 9: headset battery while charging.** Plug the headset in to charge, then run `lghub-lite --verbose battery 0aba` and `powershell -File tools\calibrate.ps1` (G HUB running). Expected: report the flags value. If it differs from 0x01, that bit means charging, and charging-curve support can be added.
+**TEST REQUEST 9: headset battery while charging.** Plug the headset in to charge, then run `lghub-lite --verbose battery 0aba` and `powershell -File dev\calibrate.ps1` (G HUB running). Expected: report the flags value. If it differs from 0x01, that bit means charging, and charging-curve support can be added.
 
 **TEST REQUEST 8: battery calibration** (now only a cross-check of the curve against G HUB; optional).
-- Command: `powershell -File tools\calibrate.ps1` from the repo folder, with the headset **not charging**.
+- Command: `powershell -File dev\calibrate.ps1` from the repo folder, with the headset **not charging**.
 - When: run it at several charge levels, for example full, ~60 %, ~30 % and ~10 %.
 - Each run appends a point that tightens the estimate in `src/audio.rs`.
 
@@ -341,8 +354,22 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` size | **259,072 B** with headset features (+7 KB). Before: 251,904 B with onboard memory read (+7 KB). Presets had added +41 KB, to 244,736 B. The growth is std's file and path code (`read_to_string`, `create_dir_all`, `rename`, `PathBuf`), which persistence needs and which is still smaller than any config crate; no new dependencies. Before: 203,264 B with `watch` (191,488 B before that; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
+| `lghub-lite.exe` | **284,160 B** |
+| `lghub-lite-bg.exe` | **225,280 B** |
+| Release zip (both exes + README + LICENSE) | 269,366 B |
 | Crates in tree | 3 (`lghub-lite`, `windows-sys`, `windows-link`) |
-| `devices` wall time | median 105 ms, min 101 ms (10 runs; SL2 wired + headset, includes HID++ round trips) |
-| `collections` wall time (enumeration only) | median 49 ms |
-| `watch` idle (SL2 on receiver + headset; 30 s after start-up) | **0 ms CPU** (below the 15.6 ms timer resolution), **1 thread**, working set 5.6 MB, private 0.9 MB |
+| `devices` wall time | median 115 ms (10 runs; headset + receiver, includes HID++ round trips) |
+| `watch` idle | **0 ms CPU** over 30 s, 1 thread between events, ~5.6 MB working set; one 0x1F20 read per 5 min when a voltage-only headset is present |
+
+**Size history**, with the cause of each step:
+- 184,832 B at the MVP (opt-level 3 was 201,728 B, so we keep "s");
+- 191,488 B with `rate`;
+- 203,264 B with `watch`;
+- 244,736 B with presets: std file and path code;
+- 251,904 B with onboard read;
+- 259,072 B with headset features;
+- about 309 KB with the battery curve in floats (not measured at the time; reconstructed);
+- **392 KB** with autostart via `std::process::Command`, too much, so it was replaced by `CreateProcessW` + Toolhelp: 318 KB;
+- floats replaced by fixed-point integers: **284 KB**.
+
+The `autostart` command itself costs ~6 KB.
