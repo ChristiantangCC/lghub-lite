@@ -578,6 +578,55 @@ pub fn mode_name(m: u8) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------- report rate
+
+/// 0x8061 ExtendedAdjustableReportRate state.
+pub struct ReportRate {
+    pub index: u8,
+    /// Bitmap of supported rates (bit i = `rate_hz(i)`).
+    pub supported: u8,
+    /// Bit number of the active rate.
+    pub current: u8,
+}
+
+/// Rate for bit i of the 0x8061 bitmap: bit 0 = 8 ms (125 Hz) … bit 6 = 125 µs (8000 Hz).
+/// [PUB Solaar] UNVERIFIED Hz mapping: G HUB code only shows bit = 1 << index. On the wired SL2
+/// the bitmap is 0x0F and the default bit 3, i.e. 1000 Hz, which is consistent with [PUB],
+/// but no measurement of the actual polling rate has been made.
+pub fn rate_hz(bit: u8) -> u32 {
+    125u32 << bit.min(7)
+}
+
+/// f1 GetActualReportRateList -> reply[1] = bitmap; f2 GetReportRate [connType] -> reply[0] =
+/// bit number. [OBS dec_all.c FUN_140cf3c80, FUN_140cf3dd0] connType meaning [UNK]; 0 is sent.
+/// [HW SL2 wired: f1 `00 0F`, f2 [0] `03`]
+pub fn report_rate(h: &mut Hidpp, dev: u8) -> Result<ReportRate, Error> {
+    let index = h.feature(dev, 0x8061)?;
+    let l = h.call(dev, index, 1, &[], &[])?;
+    need(&l, 2)?;
+    let g = h.call(dev, index, 2, &[0], &[])?;
+    need(&g, 1)?;
+    Ok(ReportRate {
+        index,
+        supported: l[1],
+        current: g[0],
+    })
+}
+
+/// Bit number for `hz` if the device supports it.
+pub fn rate_bit(r: &ReportRate, hz: u32) -> Option<u8> {
+    (0..8u8).find(|&b| r.supported & (1 << b) != 0 && rate_hz(b) == hz)
+}
+
+/// f3 SetReportRate [bit number]. [OBS FUN_140cf3f60: log2 of the rate bit]
+/// [HW SL2 wired, host mode: `10 FF 0C 33 02` -> f2 reads back 2, event `11 FF 0C 00 00 02`;
+/// in onboard mode the same request is refused with InvalidArgument.]
+pub fn set_report_rate(h: &mut Hidpp, dev: u8, r: &ReportRate, hz: u32) -> Result<(), Error> {
+    let bit = rate_bit(r, hz).ok_or_else(|| Error::Other(format!("{hz} Hz is not supported by the device")))?;
+    h.call(dev, r.index, 3, &[bit], &[])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -701,6 +750,24 @@ mod tests {
         ];
         assert_eq!(parse_2202_params(&after).unwrap(), (1600, 800, 1600, 2));
         assert!(parse_2202_params(&after[..9]).is_err());
+    }
+
+    #[test]
+    fn report_rate_bits() {
+        // [HW] wired SL2: supported 0x0F, current bit 3
+        let r = ReportRate {
+            index: 12,
+            supported: 0x0F,
+            current: 3,
+        };
+        assert_eq!(rate_hz(r.current), 1000);
+        assert_eq!(rate_bit(&r, 500), Some(2));
+        assert_eq!(rate_bit(&r, 125), Some(0));
+        assert_eq!(rate_bit(&r, 2000), None); // bit 4 not in the bitmap
+        assert_eq!(rate_bit(&r, 300), None);
+        // f3 request: [bit]
+        let m = hidpp::build20(DIRECT, 12, 3, 3, &[2]).unwrap();
+        assert_eq!(m, [0x10, 0xFF, 0x0C, 0x33, 0x02, 0x00, 0x00]);
     }
 
     #[test]

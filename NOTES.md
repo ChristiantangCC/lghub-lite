@@ -18,6 +18,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `info <dev>` | ✅ protocol version, name, type, firmware entities, full feature table |
 | `battery <dev>` | ✅ SL2 via 0x1004 (receiver and cable). The headset has no 0x1000/1001/1004 (it would need 0x1F20, not implemented) |
 | `dpi <dev> [v]` | ✅ read via 0x2201/0x2202. ✅ write via 0x2202 with read-back (SL2 wired, host mode). 0x2201 write is unverified (no device) |
+| `rate <dev> [hz]` | ✅ 0x8061 read and write with read-back (SL2 wired, host mode). The Hz mapping is [PUB] and unmeasured |
 | `mode <dev> [host\|onboard]` | ✅ 0x8100 get/set with read-back (SL2 wired) |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
@@ -115,6 +116,18 @@ Single binary crate, no traits, no async, no threads:
   - **f6 set `[sensor, xH, xL, yH, yL, lod]`**. We send X=Y=value and keep LOD. [OBS FUN_140cd0ff0] [HW]
     - Host mode: `-> 11 FF 09 63 00 06 40 06 40 02`, `<- 11 FF 09 63 00 06 40 06 40 02` (echo), read-back 1600.
     - Onboard mode: `<- 11 01 FF 09 63 05` (**NotAllowed**).
+### Report rate
+- **0x8061 v0** on the SL2 (index 12). [OBS dec_all.c FUN_140cf3af0 / 140cf3c80 / 140cf3dd0 / 140cf3f60] [HW SL2 wired]
+  - f1 GetActualReportRateList `[]` → reply[1] = bitmap of supported rates. `<- 11 FF 0C 13 00 0F` (bits 0–3).
+  - f2 GetReportRate `[connType]` → reply[0] = active bit number. `-> 10 FF 0C 23 00`, `<- 11 FF 0C 23 03`.
+    - `connType` meaning [UNK]; we send 0, as only 0 has been tried.
+  - f3 SetReportRate `[bit number]`.
+    - Host mode: `-> 10 FF 0C 33 02`, `<- 11 FF 0C 33 00`; f2 then reads back 2.
+    - Onboard mode: `<- 11 FF FF 0C 33 02` (**InvalidArgument**, not NotAllowed).
+  - Event (fn 0, swid 0): `11 FF 0C 00 00 <bit>`, so the new rate bit is in byte 5. Seen after a set (`02`) and after returning to onboard (`03`).
+  - f0 GetDeviceCapabilities `[connType]` echoes connType and returns a byte at reply[1]. It returned `0F` too; its meaning [UNK], unused.
+  - **Bit → Hz** = 125 << bit (8 ms … 125 µs) [PUB Solaar]. Over the cable the SL2 offers 125/250/500/1000 Hz and defaults to 1000. The real polling rate has not been measured.
+
 - **0x8100 OnboardProfiles** (SL2 index 13). [HW]
   - f2 get mode → `p[0]`: 1 = onboard [OBS §9.9], 2 = host [PUB].
   - f1 set mode `[1|2]`: G HUB sends `onboard ? 1 : 2` [OBS FUN_140d0e970].
@@ -126,6 +139,7 @@ Single binary crate, no traits, no async, no threads:
 - **§9.9, 0x2202 f2.** The range stream continues across pages at byte granularity (13 bytes per page). [HW + OBS FUN_140cd04e0 carries the parity across pages]
 - **§9.9, 0x2201/0x2202 step.** G HUB takes the step from the low byte of `0xE0xx` only. [OBS]
 - **§9.9, 0x2202 f6.** Refused with NotAllowed while 0x8100 reports onboard mode; works in host mode. [HW]
+- **§9.9, 0x8061.** f3 is refused with **InvalidArgument** (not NotAllowed) while in onboard mode; works in host mode. f1 takes no parameter; f2's reply is the bit number at byte 4. [HW]
 - **§10.7, PRO X Wireless headset (0aba).** It has **no** 0x1000/0x1001/0x1004. Its features are 0000, 0001, 0003, 0005, 8310, 8300 and **1F20 ADCMeasurement**, so battery voltage must come from 0x1F20 (layout [UNK]). [HW]
 - **§9.10 vs. the headset.** 0aba speaks plain HID++ 2.0 (protocol 4.2) on `FF43/0202`, not Centurion framing. [HW]
 - **New device** missing from G HUB 2023.1's plaintext DB: receiver **c54d** + PRO X SUPERLIGHT 2, wireless PID **0x40A9**, wired PID **0xC09B**. The agent does not list it. [HW]
@@ -151,8 +165,9 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 (c09b) | USB cable | mode host → DPI 1600 → read-back → DPI 800 → mode onboard | ✅ every step read back as written; final state = onboard, 800 |
 | 2026-10-15 | SL2 (c09b) | USB cable | human run of TEST REQUEST 2 (release build): host → 400 → 800 → onboard | ✅ all read-backs matched; **cursor noticeably slower at 400, normal at 800 (human-confirmed)**; f5 read at 400 shows X=Y=400, default 800 (confirms the §3 field-order fix) |
 | 2026-10-15 | SL2 (c09b) | USB cable | battery while charging | ✅ 38 %, good, charging, wired (rising from 28 % while charging; not yet compared against another source) |
+| 2026-10-15 | SL2 (c09b) | USB cable | report rate: read; set 500 in onboard mode; host → 500 → read-back → 1000 → onboard | ✅ read 1000 Hz (bitmap 0x0F); onboard set refused (InvalidArgument), unchanged; host set read back 500, restored 1000; final state onboard, 1000 Hz, 800 DPI |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
-| — | — | — | `cargo test`: 18 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
+| — | — | — | `cargo test`: 19 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
 All tests ran with G HUB running. G HUB does not manage the SL2.
 
@@ -176,9 +191,21 @@ TEST REQUEST 2 (physical DPI check over the cable) passed on 2026-10-15; see §5
 - What to observe: the same cursor slow-down at 400.
 - Restore: step 4. Whether host mode survives a power cycle is [UNK]; please report what you see.
 
+**TEST REQUEST 4: real polling rate (optional).** Use any mouse polling-rate checker (a web page or tool that reports Hz while you move the mouse quickly).
+- Commands, with the mouse on the cable:
+  1. `lghub-lite mode c09b host`
+  2. `lghub-lite rate c09b 125`
+  3. Measure.
+  4. `lghub-lite rate c09b 1000`
+  5. Measure.
+  6. `lghub-lite mode c09b onboard`
+- Expected: about 125 Hz at step 3 and about 1000 Hz at step 5.
+- This would turn the [PUB] bit → Hz mapping into [HW].
+- Restore: step 6.
+
 ## 7. Open questions
 - Does host mode (0x8100 = 2) persist across a power cycle or a cable unplug? [UNK]
-- **0x8061 report rate** (SL2 index 12, v0): next feature slice. The meaning of the event `11 FF 0C 00 00 03` [UNK].
+- **0x8061:** the bit → Hz mapping is only [PUB]. Confirming it needs a polling-rate measurement (TEST REQUEST 4). The meaning of `connType` and of f0 [UNK]. Over the receiver the bitmap may include 2000+ Hz bits (untested).
 - **0x1F20 ADCMeasurement** reply layout for headset battery [UNK]. G HUB maps mV through the depot XML curve (§10.6).
 - **B5 pairing reply:** bytes p[1], p[2], p[5..] not decoded.
 - **Unknown SL2 feature IDs** with no name in the G HUB table: 0x2251, 0x80E0, 0x1602, plus the engineering IDs 0x1803/0x1817/0x1830/0x1875/0x1861/0x1E02/0x1E22/0x1EB0/0x18B1.
@@ -190,7 +217,7 @@ TEST REQUEST 2 (physical DPI check over the cable) passed on 2026-10-15; see §5
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` size | **186,880 B** (opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
+| `lghub-lite.exe` size | **191,488 B** with `rate` (186,880 B before it; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
 | Crates in tree | 3 (`lghub-lite`, `windows-sys`, `windows-link`) |
 | `devices` wall time | median 105 ms, min 101 ms (10 runs, `Measure-Command`; SL2 wired + headset, includes HID++ round trips) |
 | `collections` wall time (enumeration only) | median 49 ms |

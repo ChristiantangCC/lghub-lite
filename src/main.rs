@@ -25,7 +25,8 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] <command>
   info <dev>               identity, firmware and supported features
   battery <dev>            battery state
   dpi <dev> [value]        read DPI, or set it and read it back
-  mode <dev> [host|onboard] read or set onboard-profile mode (host mode allows DPI writes)
+  rate <dev> [hz]          read report rate, or set it and read it back
+  mode <dev> [host|onboard] read or set onboard-profile mode (host mode allows DPI/rate writes)
   raw <dev> <hex...>       send one raw report, print replies (needs --allow-raw)
   collections              list every Logitech HID collection (debug)
 
@@ -74,6 +75,11 @@ fn main() {
         ["dpi", d, v] => {
             let v: u16 = v.parse().unwrap_or_else(|_| die("DPI value must be a number"));
             with_dev(&opts, d, |h, dev| dpi(h, dev, Some(v)))
+        }
+        ["rate", d] => with_dev(&opts, d, |h, dev| rate(h, dev, None)),
+        ["rate", d, v] => {
+            let v: u32 = v.parse().unwrap_or_else(|_| die("report rate must be a number in Hz"));
+            with_dev(&opts, d, |h, dev| rate(h, dev, Some(v)))
         }
         ["mode", d] => with_dev(&opts, d, |h, dev| mode(h, dev, None)),
         ["mode", d, "host"] => with_dev(&opts, d, |h, dev| mode(h, dev, Some(device::MODE_HOST))),
@@ -247,18 +253,51 @@ fn dpi(h: &mut Hidpp, dev: u8, set: Option<u16>) -> Result<(), Error> {
     }
     let Some(v) = set else { return Ok(()) };
     println!("old={}  (restore with: lghub-lite dpi <dev> {})", d.current, d.current);
-    match device::set_dpi(h, dev, &d, v) {
-        // [HW] SL2 answers NotAllowed to 0x2202 f6 while 0x8100 reports onboard mode.
-        Err(Error::Hpp20(5)) if mode == Some(device::MODE_ONBOARD) => {
-            return Err(Error::Other(
-                "device refused (NotAllowed): it is in onboard-profile mode; run `mode <dev> host` first".into(),
-            ));
-        }
-        r => r?,
-    }
+    onboard_hint(device::set_dpi(h, dev, &d, v), mode)?;
     let after = device::dpi(h, dev)?;
     println!("new={v} readback={}", after.current);
     if after.current != v {
+        return Err(Error::Other("read-back differs from the value written".into()));
+    }
+    Ok(())
+}
+
+/// Explain a write refusal when the device is in onboard-profile mode. Values are validated
+/// against the device's own capability list before sending, so the refusal comes from the mode.
+/// [HW] SL2 in onboard mode: 0x2202 f6 -> NotAllowed (5), 0x8061 f3 -> InvalidArgument (2).
+fn onboard_hint(r: Result<(), Error>, mode: Option<u8>) -> Result<(), Error> {
+    match r {
+        Err(Error::Hpp20(c @ (2 | 5))) if mode == Some(device::MODE_ONBOARD) => Err(Error::Other(format!(
+            "device refused ({}): it is in onboard-profile mode; run `mode <dev> host` first",
+            hidpp::hpp20_error_name(c)
+        ))),
+        r => r,
+    }
+}
+
+fn rate(h: &mut Hidpp, dev: u8, set: Option<u32>) -> Result<(), Error> {
+    let r = device::report_rate(h, dev)?;
+    let list: Vec<String> = (0..8u8)
+        .filter(|b| r.supported & (1 << b) != 0)
+        .map(|b| device::rate_hz(b).to_string())
+        .collect();
+    println!(
+        "rate       {} Hz  [8061, bit {}]",
+        device::rate_hz(r.current),
+        r.current
+    );
+    println!("allowed    {} Hz", list.join(", "));
+    let mode = device::onboard_mode(h, dev).ok().flatten();
+    if let Some(m) = mode {
+        println!("profiles   mode {m} ({})", device::mode_name(m));
+    }
+    let Some(hz) = set else { return Ok(()) };
+    let old = device::rate_hz(r.current);
+    println!("old={old}  (restore with: lghub-lite rate <dev> {old})");
+    onboard_hint(device::set_report_rate(h, dev, &r, hz), mode)?;
+    let after = device::rate_hz(device::report_rate(h, dev)?.current);
+    println!("new={hz} readback={after}");
+    if after != hz {
         return Err(Error::Other("read-back differs from the value written".into()));
     }
     Ok(())
