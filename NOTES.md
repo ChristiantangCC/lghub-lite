@@ -16,7 +16,9 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 |---|---|
 | `devices` | ✅ direct devices, receivers, and paired slots with online state |
 | `info <dev>` | ✅ protocol version, name, type, firmware entities, full feature table |
-| `battery <dev>` | ✅ SL2 via 0x1004 (receiver and cable). The headset has no 0x1000/1001/1004 (it would need 0x1F20, not implemented) |
+| `battery <dev>` | ✅ SL2 via 0x1004 (receiver and cable). ✅ Headset via 0x1F20: voltage plus an estimated % from our own calibration table |
+| `sidetone <dev> [0-100]` | ✅ headset 0x8300 read/write with read-back. Audible effect not yet confirmed by the human |
+| `eq <dev>` | ✅ headset 0x8310 hardware EQ, **read-only** (10 bands, ±12 dB). Writing is not supported; see §2 Headset |
 | `dpi <dev> [v]` | ✅ read via 0x2201/0x2202. ✅ write via 0x2202 with read-back in host mode, over the cable and the receiver. 0x2201 write is unverified (no device) |
 | `rate <dev> [hz]` | ✅ 0x8061 read/write with read-back in host mode, over the cable and the receiver. The Hz mapping is [PUB] and unmeasured |
 | `mode <dev> [host\|onboard]` | ✅ 0x8100 get/set with read-back, over the cable and the receiver |
@@ -41,6 +43,8 @@ Single binary crate, no traits, no async:
 - `src/watch.rs`: the `watch` loop; applies presets on every attach.
 - `src/config.rs`: preset file parse/format, apply, and `write_atomic` (write `<file>.tmp`, then rename), shared by presets and dumps.
 - `src/profiles.rs`: onboard memory read path (0x8100 f0/f4/f5/f10), CRC-CCITT, directory parsing, dump format.
+- `src/audio.rs`: headset features 0x1F20 (battery voltage + estimate), 0x8300 (sidetone), 0x8310 (EQ read).
+- `tools/calibrate.ps1` (dev-only): records `(voltage, G HUB %)` pairs into `tools/battery-calibration.csv` via the GET-only agent client.
 - `src/main.rs`: argument parsing and output.
 
 **Threads.** Our code runs on one thread. Windows runs the `CM_Register_Notification` callback on a thread-pool thread. The callback only calls `SetEvent`, and the main thread waits on that event; no window or message loop is needed. While idle the process has 1 thread [HW, see §8].
@@ -187,6 +191,37 @@ HID++ 2.0 events have swid 0 and fn 0 on a known feature index [OBS §9.5].
     - byte 0 = 3 would match the 0x8061 rate bit for 1000 Hz, and 800 is the DPI the device reports in onboard mode.
     - Field meanings need [PUB] libratbag format docs plus hardware confirmation before any decode or write.
 
+### Headset (PRO X Wireless, 0aba, HID++ 4.2 on FF43/0202)
+Features: 0x1F20 at index 6, 0x8300 at 5, 0x8310 at 4. [HW]
+
+The function layouts were read from G HUB's request code with Rizin, against the installed `lghub_agent.exe` (SHA-256 04c1f3e8…). Only single functions were disassembled; there was no whole-binary analysis. Evidence IDs and addresses are below.
+
+- **0x1F20 ADCMeasurement.** RTTI vtable 0x141932838: f0 0x140cc4070, f1 0x140cc4210, f2 0x140cc4310, f3 0x140cc4430, f4 0x140cc4560; event handler 0x140cc46c0.
+  - **f0 `[channel]`** (G HUB requires channel < 16) → `[mV BE16, flags]`. G HUB splits the flags into 4 bits (meanings [UNK]). The event has the same layout. [OBS]
+    - [HW] `-> 11 FF 06 03 00`, `<- 11 FF 06 03 0F 4F 01` = **3919 mV**, flags 0x01, while G HUB showed 80 %, not charging. So bit 0 is not "charging".
+  - f1 → one byte; [HW] `1E` (30), meaning [UNK].
+  - f2 sets one byte, f3 returns 2 bytes, f4 writes `[01, x]`: notification/config [INF]. These are not used.
+- **Battery percentage** is **our own table**, not G HUB's curve file. G HUB's percentages come from the proprietary XML curve (§10.6), which we neither copy nor read at runtime (brief §2).
+  - The ends are generic single-cell Li-ion values [PUB]: 3.3 V = 0 %, 4.2 V = 100 %.
+  - The inner points are our voltage readings paired with G HUB's % at the same moment, collected by `tools/calibrate.ps1` into `tools/battery-calibration.csv`. So far 1 point: (3917–3919 mV, 80 %).
+  - The estimate is piecewise linear and printed as "estimate". It is valid only while discharging; charging raises the voltage.
+  - Improve it by running the script at different charge levels while G HUB is still installed.
+- **0x8300 Sidetone.** Methods 0x140d23a70 / 0x140d23bb0 / 0x140d23d00.
+  - **f0 → level `[0]`.** [HW: 0, G HUB gain 0]
+  - **f1 `[level]` sets it.** [HW] `-> 11 FF 05 13 1E`, echo `1E`; read-back 30; restored 0.
+  - f2 (mute statuses) → **InvalidFunctionId** on this headset [HW].
+  - The event carries three values [OBS RTTI binder `void(uint,uint,uint)`]; not decoded.
+  - Range 0–100 is [INF] from the agent's `Volume.gain`.
+  - G HUB's agent kept reporting gain 0 after our write: it reports its own cached state.
+- **0x8310 Equalizer.** RTTI vtable 0x141942908: f0 0x140d260e0, f1 0x140d26280, f2 0x140d264a0, f3 0x140d26650, f4 0x140d26850, f5 0x140d26960.
+  - **f0** → `[count, dbRange, capabilities, dbMin i8, dbMax i8]`. [OBS log string] [HW `0A 0C 01 00 00` = 10 bands, ±12 dB]
+  - **f1 `[first band]`** → `[echo, BE16 Hz…]`, 7 bands per reply. [HW: 32 64 125 250 500 1k 2k from band 0; 4k 8k 16k from band 7]
+  - **f2** → one signed dB byte per band. [HW: all 0]
+  - **f3 SetEQ** sends `[byte from caller, gain…]` [OBS]. The first byte's meaning is [UNK].
+    - [HW] `[00, 03, 02, 00 …]` and `[00, 0 × 10]` were both refused with **InvalidArgument**; the device was unchanged.
+    - G HUB never uses this hardware EQ on this headset: agent `/devices/list` reports `onboardEqSupported: false` (G HUB's EQ for it is software). **No write is implemented**; we are not guessing further.
+  - f4/f5 (one-byte get/set) → f4 is **InvalidFunctionId** on this headset [HW].
+
 ## 3. Corrections to protocol.md
 - **§9.9, 0x2202 f5 field order.** The reply is `[sensor, X, defaultX, Y, defaultY, lod]`. [HW]
 - **§9.9, 0x2202 f2.** The range stream continues across pages at byte granularity (13 bytes per page). [HW + OBS]
@@ -196,7 +231,8 @@ HID++ 2.0 events have swid 0 and fn 0 on a known feature index [OBS §9.5].
   - f0 `[connType]` returns the rate bitmap for that connection type (0 wired, 1 wireless).
   - f1 takes no parameter and returns the active connection's bitmap.
   - **f2's result is per connType**, not global. [HW]
-- **§10.7, PRO X Wireless headset (0aba).** It has **no** 0x1000/0x1001/0x1004. Battery voltage must come from **0x1F20 ADCMeasurement** (layout [UNK]). [HW]
+- **§10.7, PRO X Wireless headset (0aba).** It has **no** 0x1000/0x1001/0x1004. Battery voltage comes from **0x1F20 ADCMeasurement** f0 `[0]` → `[mV BE16, flags]`. [HW + OBS]
+- **§8 / headset EQ.** The headset exposes a 10-band ±12 dB hardware EQ (0x8310), but G HUB does not use it (`onboardEqSupported: false`); its headset EQ is software. [HW + OBS]
 - **§9.10 vs. the headset.** 0aba speaks plain HID++ 2.0 (protocol 4.2) on `FF43/0202`, not Centurion framing. [HW]
 - **New device** missing from G HUB 2023.1's plaintext DB: receiver **c54d** + PRO X SUPERLIGHT 2, wireless PID **0x40A9**, wired PID **0xC09B**. [HW]
 
@@ -227,7 +263,8 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 | LIGHTSPEED | presets: save 1200/500 (scratch file), reject dpi=50, `apply` twice, then onboard mode and `watch` start-up | ✅ apply: "host mode, dpi 1200, rate 500", then "(already)" on the second run; `watch` applied the same at start-up and printed the device's DPI/rate events; restored onboard, 800, 1000 Hz |
 | 2026-10-15 | SL2 | LIGHTSPEED | onboard memory: `profiles`, two `dump`s, backup to %APPDATA% | ✅ 16 user sectors erased; factory directory 0x0100 → profile 0x0101 (active); device GetCRC = our CRC for erased sectors; dumps byte-identical; read-only throughout |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
-| — | — | — | `cargo test`: 30 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
+| 2026-10-15 | headset 0aba | USB (own dongle) | 0x1F20 battery, 0x8300 sidetone read + write 30 → read-back → 0, 0x8310 EQ read + write attempt | ✅ 3919 mV vs G HUB 80 %; sidetone write/read-back ok; EQ read ok; EQ write refused (InvalidArgument, unchanged) → write removed |
+| — | — | — | `cargo test`: 33 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
 All tests ran with G HUB running. G HUB does not manage the SL2.
 
@@ -246,6 +283,16 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 
 TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on 2026-10-15; see §5.
 
+**TEST REQUEST 7: headset sidetone is audible.** G HUB can stay open.
+- Commands: put the headset on, then `lghub-lite sidetone 0aba 50`, speak, then `lghub-lite sidetone 0aba 0`.
+- What to observe: at 50 you hear your own voice in the headset; at 0 you don't.
+- Also report whether G HUB later puts it back to 0 by itself.
+
+**TEST REQUEST 8: battery calibration (repeat over days, before uninstalling G HUB).**
+- Command: `powershell -File tools\calibrate.ps1` from the repo folder, with the headset **not charging**.
+- When: run it at several charge levels, for example full, ~60 %, ~30 % and ~10 %.
+- Each run appends a point that tightens the estimate in `src/audio.rs`.
+
 **TEST REQUEST 6: presets applied on reconnect.** G HUB can stay open.
 - Commands:
   1. `lghub-lite preset c54d:1 dpi=1600 rate=1000` (or any values you like).
@@ -259,7 +306,11 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 ## 7. Open questions
 - Does host mode (0x8100 = 2) persist across a power cycle or a cable unplug? [UNK]
 - **0x8061:** the bit → Hz mapping is only [PUB] (TEST REQUEST 4). How should connType be chosen for direct Bluetooth devices? [UNK]
-- **0x1F20 ADCMeasurement** reply layout for headset battery [UNK]. G HUB maps mV through the depot XML curve (§10.6).
+- **Headset:**
+  - meanings of the 0x1F20 flag bits and of f1 = 0x1E [UNK];
+  - the sidetone event values and the real maximum sidetone level [UNK];
+  - the EQ SetEQ first byte [UNK]; it can only be learned from a device/app that actually uses the hardware EQ;
+  - the battery table needs more calibration points (TEST REQUEST 8).
 - **B5 pairing reply:** bytes p[1], p[2], p[5..] not decoded.
 - **Onboard profiles before any write** (high-risk; see the brief §8):
   - decode profile format 7 with evidence;
@@ -277,7 +328,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` size | **251,904 B** with onboard memory read (+7 KB). Presets had added +41 KB, to 244,736 B. The growth is std's file and path code (`read_to_string`, `create_dir_all`, `rename`, `PathBuf`), which persistence needs and which is still smaller than any config crate; no new dependencies. Before: 203,264 B with `watch` (191,488 B before that; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
+| `lghub-lite.exe` size | **259,072 B** with headset features (+7 KB). Before: 251,904 B with onboard memory read (+7 KB). Presets had added +41 KB, to 244,736 B. The growth is std's file and path code (`read_to_string`, `create_dir_all`, `rename`, `PathBuf`), which persistence needs and which is still smaller than any config crate; no new dependencies. Before: 203,264 B with `watch` (191,488 B before that; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
 | Crates in tree | 3 (`lghub-lite`, `windows-sys`, `windows-link`) |
 | `devices` wall time | median 105 ms, min 101 ms (10 runs; SL2 wired + headset, includes HID++ round trips) |
 | `collections` wall time (enumeration only) | median 49 ms |

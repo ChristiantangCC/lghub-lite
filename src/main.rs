@@ -1,3 +1,4 @@
+mod audio;
 mod config;
 mod device;
 mod hid;
@@ -35,7 +36,9 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   profiles <dev>           onboard profile memory: info, active profile, directories, CRCs
   dump <dev> <file>        read every onboard memory sector into a text backup file
   info <dev>               identity, firmware and supported features
-  battery <dev>            battery state
+  battery <dev>            battery state (headsets: voltage and an estimated percentage)
+  sidetone <dev> [0-100]   read or set headset sidetone (hearing your own voice)
+  eq <dev>                 show the headset hardware equalizer (read-only)
   dpi <dev> [value]        read DPI, or set it and read it back
   rate <dev> [hz]          read report rate, or set it and read it back
   mode <dev> [host|onboard] read or set onboard-profile mode (host mode allows DPI/rate writes)
@@ -104,10 +107,15 @@ fn main() {
         }
         ["collections"] => collections(),
         ["info", d] => with_dev(&opts, d, info),
-        ["battery", d] => with_dev(&opts, d, |h, dev| {
-            println!("{}", device::battery(h, dev)?);
-            Ok(())
-        }),
+        ["battery", d] => with_dev(&opts, d, battery),
+        ["sidetone", d] => with_dev(&opts, d, |h, dev| sidetone(h, dev, None)),
+        ["sidetone", d, v] => {
+            let v: u8 = v
+                .parse()
+                .unwrap_or_else(|_| die("sidetone level must be a number 0-100"));
+            with_dev(&opts, d, |h, dev| sidetone(h, dev, Some(v)))
+        }
+        ["eq", d] => with_dev(&opts, d, eq),
         ["dpi", d] => with_dev(&opts, d, |h, dev| dpi(h, dev, None)),
         ["dpi", d, v] => {
             let v: u16 = v.parse().unwrap_or_else(|_| die("DPI value must be a number"));
@@ -259,7 +267,7 @@ fn devices(o: &Opts) -> Result<(), Error> {
                 println!("{:04x}      {name}  (HID++ {maj}.{min}, direct)", f.pid);
             }
             Err(Error::Hpp10(_)) => {
-                // HID++ 1.0 answer to a 2.0 ping: this is a receiver. [OBS §9.6]
+                // HID++ 1.0 answer to a 2.0 ping: this is a receiver. [OBS Â§9.6]
                 let n = device::connected_count(&mut h)
                     .map(|n| n.to_string())
                     .unwrap_or_else(|e| format!("? ({e})"));
@@ -512,6 +520,63 @@ fn dump(h: &mut Hidpp, dev: u8, file: &std::path::Path) -> Result<(), Error> {
     }
     config::write_atomic(file, &profiles::format_dump(model, &raw, &sectors)).map_err(Error::Other)?;
     println!("wrote      {} sectors to {}", sectors.len(), file.display());
+    Ok(())
+}
+
+/// Battery via 0x1004/0x1000/0x1001; headsets without those report a voltage via 0x1F20.
+fn battery(h: &mut Hidpp, dev: u8) -> Result<(), Error> {
+    match device::battery(h, dev) {
+        Ok(b) => {
+            println!("{b}");
+            return Ok(());
+        }
+        Err(Error::NoFeature(_)) => {}
+        Err(e) => return Err(e),
+    }
+    let a = audio::adc(h, dev)?;
+    let est = device::model_id(h, dev)
+        .ok()
+        .and_then(|m| audio::estimate_percent(m, a.mv))
+        .map(|p| format!("  ~{p}% (estimate from voltage)"))
+        .unwrap_or_default();
+    println!("{} mV{est}  flags={:#04x}", a.mv, a.flags);
+    Ok(())
+}
+
+fn sidetone(h: &mut Hidpp, dev: u8, set: Option<u8>) -> Result<(), Error> {
+    let cur = audio::sidetone(h, dev)?;
+    println!("sidetone   {cur}");
+    let Some(v) = set else { return Ok(()) };
+    println!("old={cur}  (restore with: lghub-lite sidetone <dev> {cur})");
+    audio::set_sidetone(h, dev, v)?;
+    let after = audio::sidetone(h, dev)?;
+    println!("new={v} readback={after}");
+    if after != v {
+        return Err(Error::Other("read-back differs from the value written".into()));
+    }
+    Ok(())
+}
+
+/// Read-only view of the headset hardware EQ (writing is not supported; see audio.rs).
+fn eq(h: &mut Hidpp, dev: u8) -> Result<(), Error> {
+    let e = audio::eq(h, dev)?;
+    let cells: Vec<String> = e
+        .freqs
+        .iter()
+        .zip(&e.gains)
+        .map(|(f, g)| {
+            if *f >= 1000 {
+                format!("{}k:{g:+}", f / 1000)
+            } else {
+                format!("{f}:{g:+}")
+            }
+        })
+        .collect();
+    println!(
+        "eq         {} bands, +/-{} dB (hardware EQ, read-only)",
+        e.info.bands, e.info.db_range
+    );
+    println!("gains      {}", cells.join("  "));
     Ok(())
 }
 
