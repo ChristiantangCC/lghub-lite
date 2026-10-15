@@ -22,9 +22,8 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
 
-**MVP chain** (discover → connect → identify → features → read → write → read-back) **works on hardware.**
-- Outstanding: the human's physical confirmation of the DPI change (TEST REQUEST 2).
-- Outstanding: the DPI write over the LIGHTSPEED receiver. Only the read path has run there, and the write was refused in onboard mode.
+**MVP done** (2026-10-15). The full chain (discover → connect → identify → features → read → write → read-back) works on hardware, and the human confirmed the physical effect: the cursor was noticeably slower at 400 DPI and back to normal at 800 (SL2, USB cable).
+- Still untested: a DPI write over the LIGHTSPEED receiver in host mode.
 
 ## 2. Protocol facts used by the code
 
@@ -150,6 +149,8 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 | LIGHTSPEED | DPI set 0x2202 f6 → 1600 (onboard mode) | ⛔ NotAllowed; unchanged |
 | 2026-10-15 | SL2 (c09b) | USB cable | battery | ✅ 28 %, charging, wired |
 | 2026-10-15 | SL2 (c09b) | USB cable | mode host → DPI 1600 → read-back → DPI 800 → mode onboard | ✅ every step read back as written; final state = onboard, 800 |
+| 2026-10-15 | SL2 (c09b) | USB cable | human run of TEST REQUEST 2 (release build): host → 400 → 800 → onboard | ✅ all read-backs matched; **cursor noticeably slower at 400, normal at 800 (human-confirmed)**; f5 read at 400 shows X=Y=400, default 800 (confirms the §3 field-order fix) |
+| 2026-10-15 | SL2 (c09b) | USB cable | battery while charging | ✅ 38 %, good, charging, wired (rising from 28 % while charging; not yet compared against another source) |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
 | — | — | — | `cargo test`: 18 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
@@ -163,19 +164,17 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 - What to observe: does N match what the mouse/another tool shows? Are the 13 % (receiver, unplugged) and 28 % (cable, a few minutes later) readings plausible?
 - Restore: nothing changes.
 
-**TEST REQUEST 2: physical DPI check.** G HUB does not manage the SL2, so it can stay open.
-- Commands:
-  1. `lghub-lite mode c09b host`
-  2. `lghub-lite dpi c09b 400`
-  3. `lghub-lite dpi c09b 800`
-  4. `lghub-lite mode c09b onboard`
-- Over the receiver, use `c54d:1` in place of `c09b`.
-- Expected output:
-  - step 1: `new=2 readback=2 (host)`;
-  - step 2: `old=800 … new=400 readback=400`;
-  - step 4: `new=1 readback=1 (onboard)`.
-- What to observe: after step 2 the cursor is clearly slower; after step 3 it is back to normal. Also try the step 1–2 pair over the receiver and confirm it works wirelessly.
-- Restore: step 4 (or a power cycle; whether host mode survives one is [UNK] — please tell me what you see).
+TEST REQUEST 2 (physical DPI check over the cable) passed on 2026-10-15; see §5.
+
+**TEST REQUEST 3: DPI write over the LIGHTSPEED receiver.** Run it when the mouse is unplugged and on the receiver.
+- Commands: the same four steps as TEST REQUEST 2, with `c54d:1` in place of `c09b`:
+  1. `lghub-lite mode c54d:1 host`
+  2. `lghub-lite dpi c54d:1 400`
+  3. `lghub-lite dpi c54d:1 800`
+  4. `lghub-lite mode c54d:1 onboard`
+- Expected output: the same read-backs as over the cable.
+- What to observe: the same cursor slow-down at 400.
+- Restore: step 4. Whether host mode survives a power cycle is [UNK]; please report what you see.
 
 ## 7. Open questions
 - Does host mode (0x8100 = 2) persist across a power cycle or a cable unplug? [UNK]
