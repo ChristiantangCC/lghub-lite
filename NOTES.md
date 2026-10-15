@@ -22,6 +22,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `mode <dev> [host\|onboard]` | ✅ 0x8100 get/set with read-back, over the cable and the receiver |
 | `watch` | ✅ event-driven monitor: device arrival/removal, receiver slot connect/disconnect (incl. sleep/wake), DPI/rate/battery events. Idle CPU 0, one thread. Human-run hot-plug test passed (TEST REQUEST 5) |
 | `preset <dev> [dpi=N] [rate=HZ] \| clear`, `presets`, `apply <dev>` | ✅ per-model presets in `%APPDATA%\lghub-lite\presets.txt` (`--config` overrides). `apply` and `watch` switch to host mode and set DPI/rate with read-back (SL2 over the receiver) |
+| `profiles <dev>`, `dump <dev> <file>` | ✅ read-only 0x8100 onboard memory: info, active profile, user/factory directories, per-sector CRC status, full text backup (atomic write). Nothing is written to the device. SL2 backup saved at `%APPDATA%\lghub-lite\onboard-backup-40a9-2026-10-15.txt` |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
 
@@ -38,7 +39,8 @@ Single binary crate, no traits, no async:
 - `src/hidpp.rs`: framing, swid, reply matching, error decoding, retries, queue of unsolicited reports, Root/ping, feature names.
 - `src/device.rs`: interface grouping, receiver slots, identity, battery, DPI, report rate, onboard mode, event decoding.
 - `src/watch.rs`: the `watch` loop; applies presets on every attach.
-- `src/config.rs`: preset file parse/format, atomic save (write `.tmp`, then rename), apply.
+- `src/config.rs`: preset file parse/format, apply, and `write_atomic` (write `<file>.tmp`, then rename), shared by presets and dumps.
+- `src/profiles.rs`: onboard memory read path (0x8100 f0/f4/f5/f10), CRC-CCITT, directory parsing, dump format.
 - `src/main.rs`: argument parsing and output.
 
 **Threads.** Our code runs on one thread. Windows runs the `CM_Register_Notification` callback on a thread-pool thread. The callback only calls `SetEvent`, and the main thread waits on that event; no window or message loop is needed. While idle the process has 1 thread [HW, see §8].
@@ -165,6 +167,25 @@ HID++ 2.0 events have swid 0 and fn 0 on a known feature index [OBS §9.5].
   - f2 get mode → `p[0]`: 1 = onboard [OBS §9.9], 2 = host [PUB].
   - f1 set `[1|2]`: G HUB sends `onboard ? 1 : 2` [OBS FUN_140d0e970].
   - Returning to onboard mode makes the device apply its profile DPI and rate again; it emits DPI and rate events.
+- **Onboard memory, read-only.** [HW SL2 over the receiver, G HUB running]
+  - **f0 GetOnboardProfilesInfo** → `[memModel, profileFormat, macroFormat, profileCount, factoryCount, buttonCount, sectorCount, sectorSize BE16, layout]`. [OBS FUN_140d0e7b0]
+    - SL2: `01 07 01 05 01 05 10 00 FF 0A 04`. That is memory model 1, profile format 7, macro format 1, 5 user profiles, 1 factory profile, 5 buttons, **16 sectors of 255 B**, layout 0x0A (G-shift + DPI-shift by G HUB's masks). Trailing byte 0x04 [UNK].
+  - **f4 GetActiveProfile** → BE16 sector. [OBS FUN_140d0eda0] SL2: **0x0101**, the factory profile.
+  - **f5 ReadData `[sector BE16, offset BE16]`** → 16 bytes. [OBS FUN_140d0ef20]
+    - A 255-byte sector is read at offsets 0, 16, …, 224 plus a final read at **239** (255 − 16), so nothing past the sector is requested [INF/PUB].
+    - Over the receiver, 288 reads (18 sectors) took 3.7 s. Two consecutive dumps were byte-identical.
+  - **f10 GetCRC `[sector BE16]`** → BE16 CRC, repeated (`B9 2A` × 8 for an erased sector). [OBS FUN_140d0fa30 sends the sector; reply layout HW]
+    - **CRC-CCITT (init 0xFFFF, poly 0x1021) over sectorSize − 2 bytes = 0xB92A for 253 × FF**, matching the device. This confirms the CRC algorithm and coverage that a future profile write will need [PUB libratbag + HW].
+    - ROM sectors are refused with InvalidArgument.
+  - **Sector numbering.** User sectors are 0x0000..0x000F, with sector 0 the user directory; factory (ROM) sectors are 0x0100 + n, with 0x0100 the factory directory. [PUB libratbag]
+    - [HW] the active profile is 0x0101, and the ROM directory starts `01 01 01 FF FF FF`: entry `[sector 0x0101, enabled 01, reserved FF]`, then the `FFFF` end marker.
+  - **SL2 state.** All 16 user sectors are erased (all FF), so no user profile has ever been written and the mouse runs factory profile 0x0101. [HW]
+  - **ROM sectors have no CRC.** No prefix length n of 0x0100 or 0x0101 has `crc(data[..n])` stored at n, and 0x0101 ends in `FF FF`. They are reported as "factory (ROM), no CRC". [HW]
+  - **Factory profile contents (format 7), not decoded in code** [INF only]:
+    - bytes 0–3 are `03 03 00 00`;
+    - then five 5-byte entries that look like `[X LE16, Y LE16, LOD]`: 800, 1200, 1600, 2400, 3200 DPI, each with LOD 2;
+    - byte 0 = 3 would match the 0x8061 rate bit for 1000 Hz, and 800 is the DPI the device reports in onboard mode.
+    - Field meanings need [PUB] libratbag format docs plus hardware confirmation before any decode or write.
 
 ## 3. Corrections to protocol.md
 - **§9.9, 0x2202 f5 field order.** The reply is `[sensor, X, defaultX, Y, defaultY, lod]`. [HW]
@@ -204,8 +225,9 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 | LIGHTSPEED | `watch` idle 30 s | ✅ 0 ms CPU, 1 thread, 5.6 MB working set |
 | 2026-10-15 | SL2 + receiver | LIGHTSPEED / cable | human run of TEST REQUEST 5 with `watch`: mouse off/on, cable in/out, receiver out/in, idle sleep then move | ✅ 0x41 link lost/connected on power cycle and on sleep/wake; re-announced DPI/rate/battery events; receiver and cable removal (os error 1167) and arrival; slot ping before link-up answered 0x08 |
 | 2026-10-15 | SL2 | LIGHTSPEED | presets: save 1200/500 (scratch file), reject dpi=50, `apply` twice, then onboard mode and `watch` start-up | ✅ apply: "host mode, dpi 1200, rate 500", then "(already)" on the second run; `watch` applied the same at start-up and printed the device's DPI/rate events; restored onboard, 800, 1000 Hz |
+| 2026-10-15 | SL2 | LIGHTSPEED | onboard memory: `profiles`, two `dump`s, backup to %APPDATA% | ✅ 16 user sectors erased; factory directory 0x0100 → profile 0x0101 (active); device GetCRC = our CRC for erased sectors; dumps byte-identical; read-only throughout |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
-| — | — | — | `cargo test`: 24 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
+| — | — | — | `cargo test`: 30 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
 All tests ran with G HUB running. G HUB does not manage the SL2.
 
@@ -239,6 +261,14 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 - **0x8061:** the bit → Hz mapping is only [PUB] (TEST REQUEST 4). How should connType be chosen for direct Bluetooth devices? [UNK]
 - **0x1F20 ADCMeasurement** reply layout for headset battery [UNK]. G HUB maps mV through the depot XML curve (§10.6).
 - **B5 pairing reply:** bytes p[1], p[2], p[5..] not decoded.
+- **Onboard profiles before any write** (high-risk; see the brief §8):
+  - decode profile format 7 with evidence;
+  - confirm GetCRC on a non-erased flash sector;
+  - check what f10's repeated bytes mean;
+  - find the write sequence (f6 begin, f7 16-byte write with BE16 result, f8 end; §9.9);
+  - **get explicit human approval.**
+  - The backup `%APPDATA%\lghub-lite\onboard-backup-40a9-2026-10-15.txt` exists. Restoring from it is not implemented.
+- **Factory directory sector 0x0100** contains more than the directory after the `FFFF` end marker (bytes such as `03 04 05 06 00 01 02 …`, `D0 07`, …). Their meaning is [UNK].
 - **Unknown SL2 feature IDs:** 0x2251, 0x80E0, 0x1602, plus the engineering IDs 0x1803/0x1817/0x1830/0x1875/0x1861/0x1E02/0x1E22/0x1EB0/0x18B1.
 - **`watch` limit:** it waits on at most 63 collections (the `WaitForMultipleObjects` limit). That is far beyond any realistic setup.
 - **Agent `GET /routes`** (§14 #1, 2026-10-15): 457 route entries, 305 unique paths.
@@ -247,7 +277,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` size | **244,736 B** with presets (+41 KB). The growth is std's file and path code (`read_to_string`, `create_dir_all`, `rename`, `PathBuf`), which persistence needs and which is still smaller than any config crate; no new dependencies. Before: 203,264 B with `watch` (191,488 B before that; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
+| `lghub-lite.exe` size | **251,904 B** with onboard memory read (+7 KB). Presets had added +41 KB, to 244,736 B. The growth is std's file and path code (`read_to_string`, `create_dir_all`, `rename`, `PathBuf`), which persistence needs and which is still smaller than any config crate; no new dependencies. Before: 203,264 B with `watch` (191,488 B before that; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
 | Crates in tree | 3 (`lghub-lite`, `windows-sys`, `windows-link`) |
 | `devices` wall time | median 105 ms, min 101 ms (10 runs; SL2 wired + headset, includes HID++ round trips) |
 | `collections` wall time (enumeration only) | median 49 ms |

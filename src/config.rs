@@ -98,13 +98,20 @@ pub fn load(path: &Path) -> Result<Vec<Preset>, String> {
     }
 }
 
-/// Atomic save: write a temp file next to the target, then rename over it.
 pub fn save(path: &Path, presets: &[Preset]) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
+    write_atomic(path, &format(presets))
+}
+
+/// Atomic write: write a temp file next to the target, then rename over it, so a crash never
+/// leaves a half-written file. Used for presets and onboard memory dumps.
+pub fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, format(presets)).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, contents).map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -207,7 +214,7 @@ mod tests {
         }];
         save(&path, &p).unwrap();
         assert_eq!(load(&path).unwrap(), p);
-        assert!(!path.with_extension("tmp").exists());
+        assert!(!dir.join("presets.txt.tmp").exists());
         // overwrite existing file
         let q = vec![Preset {
             model: 0x40A9,

@@ -2,6 +2,7 @@ mod config;
 mod device;
 mod hid;
 mod hidpp;
+mod profiles;
 mod watch;
 
 use std::path::PathBuf;
@@ -31,6 +32,8 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   preset <dev> [dpi=N] [rate=HZ] | clear
                            save (or remove) the preset for this device's model
   apply <dev>              apply the saved preset now (switches the device to host mode)
+  profiles <dev>           onboard profile memory: info, active profile, directories, CRCs
+  dump <dev> <file>        read every onboard memory sector into a text backup file
   info <dev>               identity, firmware and supported features
   battery <dev>            battery state
   dpi <dev> [value]        read DPI, or set it and read it back
@@ -93,6 +96,8 @@ fn main() {
         ["watch"] => opts.config_path().and_then(|c| watch::run(opts.swid, opts.trace, &c)),
         ["presets"] => presets(&opts),
         ["preset", d, rest @ ..] => preset(&opts, d, rest),
+        ["profiles", d] => with_dev(&opts, d, show_profiles),
+        ["dump", d, file] => with_dev(&opts, d, |h, dev| dump(h, dev, std::path::Path::new(file))),
         ["apply", d] => {
             let path = opts.config_path().unwrap_or_else(|e| die(&e.to_string()));
             with_dev(&opts, d, |h, dev| apply(h, dev, &path))
@@ -409,6 +414,104 @@ fn rate(h: &mut Hidpp, dev: u8, set: Option<u32>) -> Result<(), Error> {
     if after != hz {
         return Err(Error::Other("read-back differs from the value written".into()));
     }
+    Ok(())
+}
+
+fn sector_label(sector: u16) -> String {
+    match sector {
+        profiles::USER_DIRECTORY => "user directory".into(),
+        profiles::ROM_BASE => "factory directory".into(),
+        s if s > profiles::ROM_BASE => format!("factory profile {}", s - profiles::ROM_BASE),
+        s => format!("user sector {s}"),
+    }
+}
+
+fn state_text(s: &profiles::SectorState) -> String {
+    match s {
+        profiles::SectorState::Erased => "erased".into(),
+        profiles::SectorState::Rom => "factory (ROM), no CRC".into(),
+        profiles::SectorState::CrcOk => "CRC ok".into(),
+        profiles::SectorState::CrcBad(c, st) => format!("CRC MISMATCH (computed {c:04X}, stored {st:04X})"),
+    }
+}
+
+/// Read-only overview of onboard profile memory.
+fn show_profiles(h: &mut Hidpp, dev: u8) -> Result<(), Error> {
+    let (fi, _, i) = profiles::info(h, dev)?;
+    println!(
+        "info       {} user profiles, {} factory, {} buttons, {} sectors x {} B (profile format {}, macro format {}, memory model {}{}{})",
+        i.profile_count,
+        i.factory_count,
+        i.button_count,
+        i.sector_count,
+        i.sector_size,
+        i.profile_format,
+        i.macro_format,
+        i.mem_model,
+        if i.layout & 3 == 2 { ", G-shift" } else { "" },
+        if i.layout & 0xC == 8 { ", DPI-shift" } else { "" },
+    );
+    if let Some(m) = device::onboard_mode(h, dev)? {
+        println!("mode       {m} ({})", device::mode_name(m));
+    }
+    let active = profiles::active_profile(h, dev, fi)?;
+    println!("active     {active:04x} ({})", sector_label(active));
+    for dir in [profiles::USER_DIRECTORY, profiles::ROM_BASE] {
+        let data = profiles::read_sector(h, dev, fi, dir, i.sector_size)?;
+        let entries = profiles::parse_directory(&data);
+        println!(
+            "{:<10} {} ({})",
+            if dir == 0 { "user" } else { "factory" },
+            sector_label(dir),
+            state_text(&profiles::sector_state(dir, &data))
+        );
+        if entries.is_empty() {
+            println!("             no profiles");
+        }
+        for (sec, enabled) in entries {
+            let state = match profiles::read_sector(h, dev, fi, sec, i.sector_size) {
+                Ok(d) => state_text(&profiles::sector_state(sec, &d)),
+                Err(e) => format!("unreadable: {e}"),
+            };
+            println!(
+                "             {sec:04x} {} {}  {state}",
+                sector_label(sec),
+                if enabled { "enabled" } else { "disabled" }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read every user sector and every factory sector into a text backup. Read-only.
+fn dump(h: &mut Hidpp, dev: u8, file: &std::path::Path) -> Result<(), Error> {
+    let model = device::model_id(h, dev)?;
+    let (fi, raw, i) = profiles::info(h, dev)?;
+    let user = 0..i.sector_count as u16;
+    let rom = profiles::ROM_BASE..=profiles::ROM_BASE + i.factory_count as u16;
+    let mut sectors = Vec::new();
+    for sec in user.chain(rom) {
+        let data = profiles::read_sector(h, dev, fi, sec, i.sector_size)?;
+        let state = profiles::sector_state(sec, &data);
+        // Cross-check our CRC with the device's for flash sectors that hold data. [HW f10]
+        let dev_crc = if sec < profiles::ROM_BASE && state != profiles::SectorState::Erased {
+            match profiles::device_crc(h, dev, fi, sec) {
+                Ok(c) if c == profiles::crc_ccitt(&data[..data.len() - 2]) => ", device CRC agrees".to_string(),
+                Ok(c) => format!(", device CRC {c:04X} DIFFERS"),
+                Err(e) => format!(", device CRC: {e}"),
+            }
+        } else {
+            String::new()
+        };
+        println!(
+            "sector {sec:04x}  {:<18} {}{dev_crc}",
+            sector_label(sec),
+            state_text(&state)
+        );
+        sectors.push((sec, data));
+    }
+    config::write_atomic(file, &profiles::format_dump(model, &raw, &sectors)).map_err(Error::Other)?;
+    println!("wrote      {} sectors to {}", sectors.len(), file.display());
     Ok(())
 }
 
