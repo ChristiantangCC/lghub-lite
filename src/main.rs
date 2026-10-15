@@ -36,7 +36,8 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   profiles <dev>           onboard profile memory: info, active profile, directories, CRCs
   dump <dev> <file>        read every onboard memory sector into a text backup file
   info <dev>               identity, firmware and supported features
-  battery <dev>            battery state (headsets: voltage and an estimated percentage)
+  battery <dev>            battery state (headsets: voltage; percentage needs a power-model
+                           XML copied from your own G HUB install into the preset folder)
   sidetone <dev> [0-100]   read or set headset sidetone (hearing your own voice)
   eq <dev>                 show the headset hardware equalizer (read-only)
   dpi <dev> [value]        read DPI, or set it and read it back
@@ -61,6 +62,12 @@ impl Opts {
             .clone()
             .or_else(config::default_path)
             .ok_or_else(|| Error::Other("APPDATA is not set; pass --config FILE".into()))
+    }
+
+    /// Folder holding the preset file; battery curve XMLs are looked up here too.
+    fn curve_dir(&self) -> Result<PathBuf, Error> {
+        let p = self.config_path()?;
+        Ok(p.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")))
     }
 }
 
@@ -107,7 +114,10 @@ fn main() {
         }
         ["collections"] => collections(),
         ["info", d] => with_dev(&opts, d, info),
-        ["battery", d] => with_dev(&opts, d, battery),
+        ["battery", d] => {
+            let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
+            with_dev(&opts, d, |h, dev| battery(h, dev, &dir))
+        }
         ["sidetone", d] => with_dev(&opts, d, |h, dev| sidetone(h, dev, None)),
         ["sidetone", d, v] => {
             let v: u8 = v
@@ -523,23 +533,15 @@ fn dump(h: &mut Hidpp, dev: u8, file: &std::path::Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Battery via 0x1004/0x1000/0x1001; headsets without those report a voltage via 0x1F20.
-fn battery(h: &mut Hidpp, dev: u8) -> Result<(), Error> {
-    match device::battery(h, dev) {
-        Ok(b) => {
-            println!("{b}");
-            return Ok(());
-        }
-        Err(Error::NoFeature(_)) => {}
-        Err(e) => return Err(e),
+fn battery(h: &mut Hidpp, dev: u8, curve_dir: &std::path::Path) -> Result<(), Error> {
+    let line = audio::battery_text(h, dev, curve_dir)?;
+    println!("{line}");
+    if line.contains("no battery curve") {
+        println!(
+            "hint       for a percentage, copy your G HUB power model (e.g. C:\\ProgramData\\LGHUB\\depots\\<n>\\pro_headset\\pro_x_wireless_headset_battery.xml) into {}",
+            curve_dir.display()
+        );
     }
-    let a = audio::adc(h, dev)?;
-    let est = device::model_id(h, dev)
-        .ok()
-        .and_then(|m| audio::estimate_percent(m, a.mv))
-        .map(|p| format!("  ~{p}% (estimate from voltage)"))
-        .unwrap_or_default();
-    println!("{} mV{est}  flags={:#04x}", a.mv, a.flags);
     Ok(())
 }
 

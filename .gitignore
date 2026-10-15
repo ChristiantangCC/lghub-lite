@@ -6,3 +6,5 @@
 # never commit anything copied from G HUB or ../reference
 /reference/
 LGHUB/
+# Logitech power-model curves are user-supplied (copied from their own G HUB); never commit
+*.xml

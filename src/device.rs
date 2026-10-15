@@ -599,7 +599,7 @@ pub fn mode_name(m: u8) -> &'static str {
 // ---------------------------------------------------------------- events
 
 /// Feature IDs whose events `decode_event` understands.
-pub const EVENT_FEATURES: [u16; 3] = [0x1004, 0x2202, 0x8061];
+pub const EVENT_FEATURES: [u16; 4] = [0x1004, 0x2202, 0x8061, 0x1F20];
 
 #[derive(Debug, PartialEq)]
 pub enum Event {
@@ -621,6 +621,9 @@ pub enum Event {
     /// 0x8061 event [connType, rate bit]. [HW SL2: `11 FF 0C 00 00 02` wired after setting
     /// bit 2; `11 01 0C 00 01 03` over the receiver]
     ReportRate { conn: u8, bit: u8 },
+    /// 0x1F20 event `[mV BE16, flags]`, same layout as f0. [OBS 0x140cc46c0] Not yet seen on
+    /// hardware: the headset's 0x1F20 traffic so far was G HUB's own polling (swid 0x0D).
+    Voltage { mv: u16, flags: u8 },
 }
 
 /// Decode an unsolicited report. `feats` maps feature index -> feature ID for the device at
@@ -650,6 +653,10 @@ pub fn decode_event(r: &[u8], feats: &[(u8, u16)]) -> Option<Event> {
                     lod: p[5],
                 }),
                 0x8061 if p.len() >= 2 => Some(Event::ReportRate { conn: p[0], bit: p[1] }),
+                0x1F20 if p.len() >= 3 => Some(Event::Voltage {
+                    mv: u16::from_be_bytes([p[0], p[1]]),
+                    flags: p[2],
+                }),
                 _ => None,
             }
         }
@@ -681,6 +688,7 @@ impl std::fmt::Display for Event {
                 rate_hz(*bit),
                 if *conn == 0 { "wired" } else { "wireless" }
             ),
+            Event::Voltage { mv, flags } => write!(f, "battery {mv} mV flags={flags:#04x}"),
         }
     }
 }
@@ -892,6 +900,17 @@ mod tests {
             v.resize(20, 0);
             v
         };
+        // headset 0x1F20 at index 6: event [mV BE16, flags]; G HUB's poll replies (swid 0x0D,
+        // seen on [HW]: `11 FF 06 0D 0F 44 01`) are not events
+        let headset = [(6u8, 0x1F20u16)];
+        assert_eq!(
+            decode_event(&pad(&[0x11, 0xFF, 0x06, 0x00, 0x0F, 0x44, 0x01]), &headset),
+            Some(Event::Voltage { mv: 3908, flags: 1 })
+        );
+        assert_eq!(
+            decode_event(&pad(&[0x11, 0xFF, 0x06, 0x0D, 0x0F, 0x44, 0x01]), &headset),
+            None
+        );
         // [HW] SL2 wired
         assert_eq!(
             decode_event(

@@ -1,13 +1,18 @@
 //! `watch`: long-running, event-driven monitor. The main thread blocks in a single
 //! WaitForMultipleObjects on every open HID++ collection plus the PnP notification event,
-//! so it uses no CPU while nothing happens. There is no polling.
+//! so it uses no CPU while nothing happens. The one exception: headsets that report battery
+//! only as a voltage (0x1F20) are read every BATTERY_POLL, because no unsolicited 0x1F20
+//! event has been seen on hardware (G HUB polls it too). Battery drains over hours, so a
+//! 5-minute read costs nothing measurable.
 //! Whenever a device attaches (start-up, plug-in, receiver link-up, wake from sleep) its preset
 //! from the preset file is applied; the file is re-read each time, so edits need no restart.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::System::Threading::INFINITE;
 
+use crate::audio::{self, Adc, Curve};
 use crate::config;
 use crate::device::{self, EVENT_FEATURES, Event};
 use crate::hid::{self, Notifier, Wake};
@@ -18,7 +23,14 @@ struct Dev {
     index: u8,
     /// Feature index -> ID for the features whose events we decode.
     feats: Vec<(u8, u16)>,
+    /// Battery reported only as a voltage (0x1F20); read on a timer.
+    has_voltage: bool,
+    curve: Option<Curve>,
+    /// What was last printed for the battery, to print only changes.
+    last_battery: String,
 }
+
+const BATTERY_POLL: Duration = Duration::from_secs(300);
 
 /// One open HID++ interface (a direct device or a receiver).
 struct Live {
@@ -46,6 +58,7 @@ pub fn run(swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
     println!("presets    {}", presets.display());
     sync(&mut live, swid, trace, presets)?;
     println!("watching for device and setting changes (Ctrl+C to stop)");
+    let mut next_poll = Instant::now() + BATTERY_POLL;
     loop {
         // Reports that arrived while a transaction was waiting for its reply.
         for l in live.iter_mut() {
@@ -58,7 +71,16 @@ pub fn run(swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
             Report(usize, Vec<u8>),
             Gone(usize, std::io::Error),
             Pnp,
+            Poll,
         }
+        let polling = live.iter().any(|l| l.devs.iter().any(|d| d.has_voltage));
+        let timeout = if polling {
+            // < INFINITE, so a long wait can never be mistaken for "no timeout"
+            let ms = next_poll.saturating_duration_since(Instant::now()).as_millis();
+            ms.min(u32::MAX as u128 - 1) as u32
+        } else {
+            INFINITE
+        };
         let got = {
             let mut hs = Vec::new();
             let mut owner = Vec::new();
@@ -68,10 +90,11 @@ pub fn run(swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
                     owner.push(k);
                 }
             }
-            match hid::wait_any(&mut hs, Some(&notifier), INFINITE) {
+            match hid::wait_any(&mut hs, Some(&notifier), timeout) {
                 Wake::Report(i, r) => Got::Report(owner[i], r),
                 Wake::Failed(i, e) => Got::Gone(owner[i], e),
-                Wake::Extra | Wake::Timeout => Got::Pnp,
+                Wake::Extra => Got::Pnp,
+                Wake::Timeout => Got::Poll,
             }
         };
         match got {
@@ -85,6 +108,12 @@ pub fn run(swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
                 // re-enumerate once.
                 notifier.settle(300);
                 sync(&mut live, swid, trace, presets)?;
+            }
+            Got::Poll => {
+                next_poll = Instant::now() + BATTERY_POLL;
+                for l in live.iter_mut() {
+                    poll_battery(l);
+                }
             }
         }
     }
@@ -170,12 +199,34 @@ fn attach(l: &mut Live, index: u8) {
             feats.push((i, id));
         }
     }
-    let battery = device::battery(&mut l.h, index)
-        .map(|b| format!("  battery {b}"))
-        .unwrap_or_default();
+    let has_voltage = feats.iter().any(|f| f.1 == 0x1F20);
+    let mut dev = Dev {
+        index,
+        feats,
+        has_voltage,
+        curve: None,
+        last_battery: String::new(),
+    };
+    let battery = if has_voltage {
+        let dir = l.presets.parent().map(Path::to_path_buf).unwrap_or_default();
+        dev.curve = device::model_id(&mut l.h, index)
+            .ok()
+            .and_then(|m| audio::find_curve(&dir, m));
+        match audio::adc(&mut l.h, index) {
+            Ok(a) => {
+                dev.last_battery = battery_key(&a, dev.curve.as_ref());
+                format!("  battery {}", audio::voltage_text(&a, dev.curve.as_ref()))
+            }
+            Err(e) => format!("  battery unreadable: {e}"),
+        }
+    } else {
+        device::battery(&mut l.h, index)
+            .map(|b| format!("  battery {b}"))
+            .unwrap_or_default()
+    };
     println!("+ {sel:<8} {name}  (HID++ {maj}.{min}){battery}");
     l.devs.retain(|d| d.index != index);
-    l.devs.push(Dev { index, feats });
+    l.devs.push(dev);
     apply_preset(l, index);
 }
 
@@ -233,6 +284,40 @@ fn handle(l: &mut Live, r: &[u8], trace: bool) {
             println!("  {:<8} {ev}", l.sel(index));
             l.devs.retain(|d| d.index != index);
         }
+        Event::Voltage { mv, flags } => report_voltage(l, r[1], &Adc { mv, flags }),
         _ => println!("  {:<8} {ev}", l.sel(r[1])),
+    }
+}
+
+/// Change key for battery printing: the percentage with a curve, else 10 mV steps.
+fn battery_key(a: &Adc, curve: Option<&Curve>) -> String {
+    match curve {
+        Some(c) => format!("{}%", c.percent(a.mv)),
+        None => format!("{}", a.mv / 10),
+    }
+}
+
+/// Print a voltage reading if it changed what the user sees.
+fn report_voltage(l: &mut Live, index: u8, a: &Adc) {
+    let sel = l.sel(index);
+    let Some(d) = l.devs.iter_mut().find(|d| d.index == index) else {
+        return;
+    };
+    let key = battery_key(a, d.curve.as_ref());
+    if key != d.last_battery {
+        d.last_battery = key;
+        println!("  {sel:<8} battery {}", audio::voltage_text(a, d.curve.as_ref()));
+    }
+}
+
+/// Timer read for voltage-only batteries. A failed read (e.g. headset switched off) is only
+/// shown with --verbose; watch keeps running.
+fn poll_battery(l: &mut Live) {
+    let idx: Vec<u8> = l.devs.iter().filter(|d| d.has_voltage).map(|d| d.index).collect();
+    for i in idx {
+        match audio::adc(&mut l.h, i) {
+            Ok(a) => report_voltage(l, i, &a),
+            Err(e) => crate::verbose(format_args!("battery read failed: {e}")),
+        }
     }
 }

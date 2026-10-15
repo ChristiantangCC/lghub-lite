@@ -16,13 +16,13 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 |---|---|
 | `devices` | ✅ direct devices, receivers, and paired slots with online state |
 | `info <dev>` | ✅ protocol version, name, type, firmware entities, full feature table |
-| `battery <dev>` | ✅ SL2 via 0x1004 (receiver and cable). ✅ Headset via 0x1F20: voltage plus an estimated % from our own calibration table |
+| `battery <dev>` | ✅ SL2 via 0x1004 (receiver and cable). ✅ Headset via 0x1F20: voltage, plus **percentage and hours left from a user-supplied power-model XML** (matches G HUB: 78 % / 18.8 h vs 78 % / 18.7 h). Without the file, voltage only |
 | `sidetone <dev> [0-100]` | ⚠️ headset 0x8300 read/write with read-back works, but **no audible effect at 50** (human test 2026-10-15). Real control path unknown |
 | `eq <dev>` | ✅ headset 0x8310 hardware EQ, **read-only** (10 bands, ±12 dB). Writing is not supported; see §2 Headset |
 | `dpi <dev> [v]` | ✅ read via 0x2201/0x2202. ✅ write via 0x2202 with read-back in host mode, over the cable and the receiver. 0x2201 write is unverified (no device) |
 | `rate <dev> [hz]` | ✅ 0x8061 read/write with read-back in host mode, over the cable and the receiver. The Hz mapping is [PUB] and unmeasured |
 | `mode <dev> [host\|onboard]` | ✅ 0x8100 get/set with read-back, over the cable and the receiver |
-| `watch` | ✅ event-driven monitor: device arrival/removal, receiver slot connect/disconnect (incl. sleep/wake), DPI/rate/battery events. Idle CPU 0, one thread. Human-run hot-plug test passed (TEST REQUEST 5) |
+| `watch` | ✅ event-driven monitor: device arrival/removal, receiver slot connect/disconnect (incl. sleep/wake), DPI/rate/battery events. Headset battery (0x1F20) is read every 5 min and printed only when the % changes, the one timer in the program (see Headset). Idle CPU 0, one thread between reads. Human-run hot-plug test passed (TEST REQUEST 5) |
 | `preset <dev> [dpi=N] [rate=HZ] \| clear`, `presets`, `apply <dev>` | ✅ per-model presets in `%APPDATA%\lghub-lite\presets.txt` (`--config` overrides). `apply` and `watch` switch to host mode and set DPI/rate with read-back (SL2 over the receiver) |
 | `profiles <dev>`, `dump <dev> <file>` | ✅ read-only 0x8100 onboard memory: info, active profile, user/factory directories, per-sector CRC status, full text backup (atomic write). Nothing is written to the device. SL2 backup saved at `%APPDATA%\lghub-lite\onboard-backup-40a9-2026-10-15.txt` |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
@@ -201,12 +201,20 @@ The function layouts were read from G HUB's request code with Rizin, against the
     - [HW] `-> 11 FF 06 03 00`, `<- 11 FF 06 03 0F 4F 01` = **3919 mV**, flags 0x01, while G HUB showed 80 %, not charging. So bit 0 is not "charging".
   - f1 → one byte; [HW] `1E` (30), meaning [UNK].
   - f2 sets one byte, f3 returns 2 bytes, f4 writes `[01, x]`: notification/config [INF]. These are not used.
-- **Linear estimate is inadequate** [HW+file check]: G HUB's own percentage = remaining share of the discharge capacity at that voltage, and that curve is strongly non-linear (≈91 % at 4.0 V, 80.5 % at 3.919 V matching G HUB's 80 %, 63 % at 3.8 V, 28 % at 3.7 V). A 3-point linear table errs by >20 points near 3.7 V. Replacement pending the human's decision (see §7).
-- **Battery percentage** is **our own table**, not G HUB's curve file. G HUB's percentages come from the proprietary XML curve (§10.6), which we neither copy nor read at runtime (brief §2).
-  - The ends are generic single-cell Li-ion values [PUB]: 3.3 V = 0 %, 4.2 V = 100 %.
-  - The inner points are our voltage readings paired with G HUB's % at the same moment, collected by `tools/calibrate.ps1` into `tools/battery-calibration.csv`. So far 1 point: (3917–3919 mV, 80 %).
-  - The estimate is piecewise linear and printed as "estimate". It is valid only while discharging; charging raises the voltage.
-  - Improve it by running the script at different charge levels while G HUB is still installed.
+- **Battery percentage: user-supplied curve** (human decision, 2026-10-15).
+  - **How it works.** lghub-lite looks in the preset folder (`%APPDATA%\lghub-lite\`, or the folder of `--config`) for a `*.xml` power model whose `<powermodel pid=…>` equals the device's model ID.
+    - The user copies that file from their **own** G HUB install, e.g. `C:\ProgramData\LGHUB\depotsr476\pro_headset\pro_x_wireless_headset_battery.xml`.
+    - It is **never bundled or committed** (`*.xml` is in `.gitignore`), and lghub-lite never reads G HUB's install folder. Without the file, only the voltage is shown, with a hint.
+  - **Format used** [OBS file + protocol.md §10.6]: the `<discharge>` rows `minutes, volts, mAh used` (inside CDATA), and `<blocks default_unit="milliamps">` `power="N"` currents.
+  - **Percent** = remaining share of the final mAh, taking the first row (in time order) at or below the measured voltage, floored.
+    - [HW + file] 3919 mV → 80.5 % (G HUB showed 80); 3903 mV → **78 % (G HUB 78)**.
+    - The curve is non-linear (≈91 % at 4.0 V, 63 % at 3.8 V, 28 % at 3.7 V), which is why the earlier 3-point linear table was dropped.
+  - **Hours left** = remaining mAh / summed block current (53 mA here). Matches G HUB's `mileage` (18.8 h vs 18.7 h) and `maxLifeSpan` (1271 / 53 = 23.98 h).
+  - Real files have 1 mV wiggles, so only mAh must be non-decreasing and the voltage must fall overall.
+  - **Charging is not handled yet.** The `<charging>` tables are ignored, and while charging the voltage reads high, so the % is overstated. The 0x1F20 flag bits that indicate charging are [UNK]; this needs a reading while plugged in (TEST REQUEST 9).
+- **No unsolicited 0x1F20 events** in ~3.5 min of capture with G HUB running. Only G HUB's own reads (`11 FF 06 0D …`, swid 0x0D, about once a minute) were seen.
+  - 0x1F20 f3 config read returns `01 01` [HW]. Its meaning is [INF]: possibly "reporting enabled", but no event arrived.
+  - So `watch` reads the voltage itself every **5 minutes**. This is the only timer in the program, justified because battery changes over hours and G HUB itself polls every ~60 s. It prints only when the percentage (or, without a curve, the 10 mV step) changes.
 - **0x8300 Sidetone.** Methods 0x140d23a70 / 0x140d23bb0 / 0x140d23d00.
   - **f0 → level `[0]`.** [HW: 0, G HUB gain 0]
   - **f1 `[level]` sets it.** [HW] `-> 11 FF 05 13 1E`, echo `1E`; read-back 30; restored 0.
@@ -265,7 +273,7 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 | LIGHTSPEED | onboard memory: `profiles`, two `dump`s, backup to %APPDATA% | ✅ 16 user sectors erased; factory directory 0x0100 → profile 0x0101 (active); device GetCRC = our CRC for erased sectors; dumps byte-identical; read-only throughout |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
 | 2026-10-15 | headset 0aba | USB (own dongle) | 0x1F20 battery, 0x8300 sidetone read + write 30 → read-back → 0, 0x8310 EQ read + write attempt | ✅ 3919 mV vs G HUB 80 %; sidetone write/read-back ok; EQ read ok; EQ write refused (InvalidArgument, unchanged) → write removed |
-| — | — | — | `cargo test`: 33 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
+| — | — | — | `cargo test`: 35 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
 All tests ran with G HUB running. G HUB does not manage the SL2.
 
@@ -289,7 +297,9 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 - What to observe: at 50 you hear your own voice in the headset; at 0 you don't.
 - Also report whether G HUB later puts it back to 0 by itself.
 
-**TEST REQUEST 8: battery calibration (repeat over days, before uninstalling G HUB).**
+**TEST REQUEST 9: headset battery while charging.** Plug the headset in to charge, then run `lghub-lite --verbose battery 0aba` and `powershell -File tools\calibrate.ps1` (G HUB running). Expected: report the flags value. If it differs from 0x01, that bit means charging, and charging-curve support can be added.
+
+**TEST REQUEST 8: battery calibration** (now only a cross-check of the curve against G HUB; optional).
 - Command: `powershell -File tools\calibrate.ps1` from the repo folder, with the headset **not charging**.
 - When: run it at several charge levels, for example full, ~60 %, ~30 % and ~10 %.
 - Each run appends a point that tightens the estimate in `src/audio.rs`.
@@ -311,7 +321,8 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
   - meanings of the 0x1F20 flag bits and of f1 = 0x1E [UNK];
   - the sidetone event values and the real maximum sidetone level [UNK];
   - the EQ SetEQ first byte [UNK]; it can only be learned from a device/app that actually uses the hardware EQ;
-  - the battery table needs more calibration points (TEST REQUEST 8).
+  - charging detection and the charging curve (TEST REQUEST 9);
+  - whether the headset ever pushes 0x1F20 events once G HUB is gone (watch decodes them if it does).
 - **B5 pairing reply:** bytes p[1], p[2], p[5..] not decoded.
 - **Onboard profiles before any write** (high-risk; see the brief §8):
   - decode profile format 7 with evidence;
