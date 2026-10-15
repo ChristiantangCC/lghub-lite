@@ -306,14 +306,19 @@ pub enum Wake {
     Report(usize, Vec<u8>),
     /// Reading hs[i] failed, e.g. the device was unplugged (ERROR_DEVICE_NOT_CONNECTED).
     Failed(usize, io::Error),
-    /// The extra handle was signalled.
-    Extra,
+    /// extras[i] was signalled.
+    Extra(usize),
     Timeout,
 }
 
-/// Wait up to `timeout_ms` (`INFINITE` allowed) for an input report on any of `hs`, or for
-/// `extra` to be signalled. Never busy-waits: one WaitForMultipleObjects call.
-pub fn wait_any(hs: &mut [&mut Handle], extra: Option<&Notifier>, timeout_ms: u32) -> Wake {
+/// Something `wait_any` can wait on besides device reads (PnP notifier, cross-thread waker).
+pub trait Signal {
+    fn event(&self) -> HANDLE;
+}
+
+/// Wait up to `timeout_ms` (`INFINITE` allowed) for an input report on any of `hs`, or for one
+/// of `extras` to be signalled. Never busy-waits: one WaitForMultipleObjects call.
+pub fn wait_any(hs: &mut [&mut Handle], extras: &[&dyn Signal], timeout_ms: u32) -> Wake {
     for (i, h) in hs.iter_mut().enumerate() {
         match h.arm() {
             Ok(Some(r)) => return Wake::Report(i, r),
@@ -322,9 +327,7 @@ pub fn wait_any(hs: &mut [&mut Handle], extra: Option<&Notifier>, timeout_ms: u3
         }
     }
     let mut evs: Vec<HANDLE> = hs.iter().map(|h| h.ev.0).collect();
-    if let Some(n) = extra {
-        evs.push(n.ev.0);
-    }
+    evs.extend(extras.iter().map(|s| s.event()));
     // SAFETY: all events are valid for the duration of the wait. At most 64 handles
     // (MAXIMUM_WAIT_OBJECTS); callers open only a few devices.
     let w = unsafe { WaitForMultipleObjects(evs.len() as u32, evs.as_ptr(), 0, timeout_ms) };
@@ -332,8 +335,8 @@ pub fn wait_any(hs: &mut [&mut Handle], extra: Option<&Notifier>, timeout_ms: u3
         return Wake::Timeout;
     }
     let i = w.wrapping_sub(WAIT_OBJECT_0) as usize;
-    if i == hs.len() && extra.is_some() {
-        return Wake::Extra;
+    if i >= hs.len() && i < evs.len() {
+        return Wake::Extra(i - hs.len());
     }
     if i >= hs.len() {
         return Wake::Failed(0, io::Error::last_os_error());
@@ -347,10 +350,48 @@ pub fn wait_any(hs: &mut [&mut Handle], extra: Option<&Notifier>, timeout_ms: u3
 /// Wait up to `timeout_ms` for an input report on any of `hs`.
 /// Returns Ok(None) on timeout, else (index into hs, report bytes).
 pub fn read_any(hs: &mut [&mut Handle], timeout_ms: u32) -> io::Result<Option<(usize, Vec<u8>)>> {
-    match wait_any(hs, None, timeout_ms) {
+    match wait_any(hs, &[], timeout_ms) {
         Wake::Report(i, r) => Ok(Some((i, r))),
         Wake::Failed(_, e) => Err(e),
-        Wake::Extra | Wake::Timeout => Ok(None),
+        Wake::Extra(_) | Wake::Timeout => Ok(None),
+    }
+}
+
+/// Wakes a thread blocked in `wait_any` from another thread (e.g. the GUI sending a command).
+/// An auto-reset event: one `wake()` releases one wait.
+pub struct Waker {
+    ev: OwnedHandle,
+}
+
+// SAFETY: Win32 event handles may be signalled and waited on from any thread.
+unsafe impl Send for Waker {}
+unsafe impl Sync for Waker {}
+
+impl Waker {
+    pub fn new() -> io::Result<Waker> {
+        // SAFETY: no attributes, no name; auto-reset, initially unsignalled.
+        let e = unsafe { CreateEventW(null(), 0, 0, null()) };
+        if e.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Waker { ev: OwnedHandle(e) })
+    }
+
+    pub fn wake(&self) {
+        // SAFETY: valid event handle.
+        unsafe { SetEvent(self.ev.0) };
+    }
+}
+
+impl Signal for Waker {
+    fn event(&self) -> HANDLE {
+        self.ev.0
+    }
+}
+
+impl Signal for Notifier {
+    fn event(&self) -> HANDLE {
+        self.ev.0
     }
 }
 
@@ -417,5 +458,26 @@ impl Notifier {
     pub fn settle(&self, ms: u32) {
         // SAFETY: valid event handle.
         while unsafe { WaitForSingleObject(self.ev.0, ms) } == WAIT_OBJECT_0 {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waker_wakes_wait_any_from_another_thread() {
+        let w = std::sync::Arc::new(Waker::new().unwrap());
+        let w2 = w.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            w2.wake();
+        });
+        let start = std::time::Instant::now();
+        assert!(matches!(wait_any(&mut [], &[w.as_ref()], 5000), Wake::Extra(0)));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        t.join().unwrap();
+        // auto-reset: no second wake pending
+        assert!(matches!(wait_any(&mut [], &[w.as_ref()], 10), Wake::Timeout));
     }
 }

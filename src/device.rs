@@ -285,7 +285,7 @@ pub fn firmware_kind_name(k: u8) -> &'static str {
 
 // ---------------------------------------------------------------- battery
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Battery {
     /// 0x1004 f1: [soc %, level bits, charging, external power]. [OBS order §10.5, PUB bytes]
     Unified {
@@ -333,6 +333,17 @@ pub fn battery(h: &mut Hidpp, dev: u8) -> Result<Battery, Error> {
     })
 }
 
+impl Battery {
+    /// State of charge in percent, when the device reports one (not for voltage-only).
+    pub fn percent(&self) -> Option<u8> {
+        match *self {
+            Battery::Unified { soc, .. } => Some(soc),
+            Battery::Level { level, .. } => Some(level),
+            Battery::Voltage { .. } => None,
+        }
+    }
+}
+
 impl std::fmt::Display for Battery {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self {
@@ -367,7 +378,7 @@ impl std::fmt::Display for Battery {
 
 // ---------------------------------------------------------------- DPI
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DpiCaps {
     /// Discrete values.
     List(Vec<u16>),
@@ -443,6 +454,7 @@ pub fn parse_dpi_list(p: &[u8]) -> Result<Option<DpiCaps>, Error> {
     Ok(Some(DpiCaps::Ranges { points, steps }))
 }
 
+#[derive(Debug, Clone)]
 pub struct Dpi {
     pub feature: u16,
     pub index: u8,
@@ -596,12 +608,61 @@ pub fn mode_name(m: u8) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------- verified writes
+// Shared by the CLI and the GUI: write, read back, and explain refusals.
+
+/// Turn a write refusal into a readable hint when the device is in onboard-profile mode.
+/// Values are validated against the device's own capability list before sending, so the
+/// refusal comes from the mode. [HW] SL2 in onboard mode: 0x2202 f6 -> NotAllowed (5),
+/// 0x8061 f3 -> InvalidArgument (2).
+pub fn explain_refusal(r: Result<(), Error>, mode: Option<u8>) -> Result<(), Error> {
+    match r {
+        Err(Error::Hpp20(c @ (2 | 5))) if mode == Some(MODE_ONBOARD) => Err(Error::Other(format!(
+            "device refused ({}): it is in onboard-profile mode; switch it to host mode first",
+            crate::hidpp::hpp20_error_name(c)
+        ))),
+        r => r,
+    }
+}
+
+fn readback<T: PartialEq + std::fmt::Display>(want: T, got: T) -> Result<T, Error> {
+    if got == want {
+        Ok(got)
+    } else {
+        Err(Error::Other(format!(
+            "read-back {got} differs from the value written ({want})"
+        )))
+    }
+}
+
+/// Set DPI (X = Y), then read it back. Returns the read-back value.
+pub fn set_dpi_verified(h: &mut Hidpp, dev: u8, value: u16) -> Result<u16, Error> {
+    let d = dpi(h, dev)?;
+    let mode = onboard_mode(h, dev).ok().flatten();
+    explain_refusal(set_dpi(h, dev, &d, value), mode)?;
+    readback(value, dpi(h, dev)?.current)
+}
+
+/// Set the report rate in Hz, then read it back. Returns the read-back value.
+pub fn set_rate_verified(h: &mut Hidpp, dev: u8, hz: u32) -> Result<u32, Error> {
+    let r = report_rate(h, dev)?;
+    let mode = onboard_mode(h, dev).ok().flatten();
+    explain_refusal(set_report_rate(h, dev, &r, hz), mode)?;
+    readback(hz, rate_hz(report_rate(h, dev)?.current))
+}
+
+/// Set onboard (1) or host (2) mode, then read it back.
+pub fn set_mode_verified(h: &mut Hidpp, dev: u8, mode: u8) -> Result<u8, Error> {
+    set_onboard_mode(h, dev, mode)?;
+    readback(mode, onboard_mode(h, dev)?.ok_or(Error::NoFeature(0x8100))?)
+}
+
 // ---------------------------------------------------------------- events
 
 /// Feature IDs whose events `decode_event` understands.
 pub const EVENT_FEATURES: [u16; 4] = [0x1004, 0x2202, 0x8061, 0x1F20];
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// Receiver 0x41 device connection: device index (slot+1), link up/down, wireless PID,
     /// device type nibble, protocol byte. [OBS §9.8 UnifyingBus::onRead]

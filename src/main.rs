@@ -366,25 +366,18 @@ fn dpi(h: &mut Hidpp, dev: u8, set: Option<u16>) -> Result<(), Error> {
     }
     let Some(v) = set else { return Ok(()) };
     println!("old={}  (restore with: lghub-lite dpi <dev> {})", d.current, d.current);
-    onboard_hint(device::set_dpi(h, dev, &d, v), mode)?;
-    let after = device::dpi(h, dev)?;
-    println!("new={v} readback={}", after.current);
-    if after.current != v {
-        return Err(Error::Other("read-back differs from the value written".into()));
-    }
+    let after = device::set_dpi_verified(h, dev, v).map_err(cli_hint)?;
+    println!("new={v} readback={after}");
     Ok(())
 }
 
-/// Explain a write refusal when the device is in onboard-profile mode. Values are validated
-/// against the device's own capability list before sending, so the refusal comes from the mode.
-/// [HW] SL2 in onboard mode: 0x2202 f6 -> NotAllowed (5), 0x8061 f3 -> InvalidArgument (2).
-fn onboard_hint(r: Result<(), Error>, mode: Option<u8>) -> Result<(), Error> {
-    match r {
-        Err(Error::Hpp20(c @ (2 | 5))) if mode == Some(device::MODE_ONBOARD) => Err(Error::Other(format!(
-            "device refused ({}): it is in onboard-profile mode; run `mode <dev> host` first",
-            hidpp::hpp20_error_name(c)
-        ))),
-        r => r,
+/// In the CLI, name the command that switches modes.
+fn cli_hint(e: Error) -> Error {
+    match e {
+        Error::Other(s) if s.contains("switch it to host mode first") => {
+            Error::Other(s.replace("switch it to host mode first", "run `mode <dev> host` first"))
+        }
+        e => e,
     }
 }
 
@@ -407,12 +400,8 @@ fn rate(h: &mut Hidpp, dev: u8, set: Option<u32>) -> Result<(), Error> {
     let Some(hz) = set else { return Ok(()) };
     let old = device::rate_hz(r.current);
     println!("old={old}  (restore with: lghub-lite rate <dev> {old})");
-    onboard_hint(device::set_report_rate(h, dev, &r, hz), mode)?;
-    let after = device::rate_hz(device::report_rate(h, dev)?.current);
+    let after = device::set_rate_verified(h, dev, hz).map_err(cli_hint)?;
     println!("new={hz} readback={after}");
-    if after != hz {
-        return Err(Error::Other("read-back differs from the value written".into()));
-    }
     Ok(())
 }
 
@@ -595,12 +584,8 @@ fn mode(h: &mut Hidpp, dev: u8, set: Option<u8>) -> Result<(), Error> {
     let cur = device::onboard_mode(h, dev)?.ok_or(Error::NoFeature(0x8100))?;
     println!("mode       {cur} ({})", device::mode_name(cur));
     let Some(m) = set else { return Ok(()) };
-    device::set_onboard_mode(h, dev, m)?;
-    let after = device::onboard_mode(h, dev)?.unwrap_or(0);
+    let after = device::set_mode_verified(h, dev, m)?;
     println!("new={m} readback={after} ({})", device::mode_name(after));
-    if after != m {
-        return Err(Error::Other("read-back differs from the mode written".into()));
-    }
     Ok(())
 }
 
