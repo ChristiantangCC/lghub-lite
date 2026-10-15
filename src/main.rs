@@ -1,8 +1,10 @@
+mod config;
 mod device;
 mod hid;
 mod hidpp;
 mod watch;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -20,10 +22,15 @@ pub fn verbose(args: std::fmt::Arguments) {
 pub const LOGITECH_VID: u16 = 0x046D;
 
 const USAGE: &str = "\
-usage: lghub-lite [--trace] [--verbose] [--swid N] <command>
+usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
 
   devices                  list HID++ devices, including those behind receivers
-  watch                    print plug/unplug, receiver connect/disconnect and setting events
+  watch                    print plug/unplug, receiver connect/disconnect and setting events;
+                           applies presets whenever a device connects
+  presets                  show the preset file
+  preset <dev> [dpi=N] [rate=HZ] | clear
+                           save (or remove) the preset for this device's model
+  apply <dev>              apply the saved preset now (switches the device to host mode)
   info <dev>               identity, firmware and supported features
   battery <dev>            battery state
   dpi <dev> [value]        read DPI, or set it and read it back
@@ -32,12 +39,23 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] <command>
   raw <dev> <hex...>       send one raw report, print replies (needs --allow-raw)
   collections              list every Logitech HID collection (debug)
 
-<dev> is PID[:INDEX] as printed by `devices`, e.g. c54d:1 (receiver slot 1) or 0aba.";
+<dev> is PID[:INDEX] as printed by `devices`, e.g. c54d:1 (receiver slot 1) or 0aba.
+Presets live in %APPDATA%\\lghub-lite\\presets.txt unless --config is given.";
 
 struct Opts {
     trace: bool,
     swid: u8,
     allow_raw: bool,
+    config: Option<PathBuf>,
+}
+
+impl Opts {
+    fn config_path(&self) -> Result<PathBuf, Error> {
+        self.config
+            .clone()
+            .or_else(config::default_path)
+            .ok_or_else(|| Error::Other("APPDATA is not set; pass --config FILE".into()))
+    }
 }
 
 fn main() {
@@ -45,6 +63,7 @@ fn main() {
         trace: false,
         swid: hidpp::DEFAULT_SWID,
         allow_raw: false,
+        config: None,
     };
     let mut args = Vec::new();
     let mut it = std::env::args().skip(1);
@@ -61,13 +80,23 @@ fn main() {
                 Some(s) => opts.swid = s,
                 None => die("--swid needs a value 1..15"),
             },
+            "--config" => match it.next() {
+                Some(p) => opts.config = Some(PathBuf::from(p)),
+                None => die("--config needs a file path"),
+            },
             _ => args.push(a),
         }
     }
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let r = match a.as_slice() {
         ["devices"] => devices(&opts),
-        ["watch"] => watch::run(opts.swid, opts.trace),
+        ["watch"] => opts.config_path().and_then(|c| watch::run(opts.swid, opts.trace, &c)),
+        ["presets"] => presets(&opts),
+        ["preset", d, rest @ ..] => preset(&opts, d, rest),
+        ["apply", d] => {
+            let path = opts.config_path().unwrap_or_else(|e| die(&e.to_string()));
+            with_dev(&opts, d, |h, dev| apply(h, dev, &path))
+        }
         ["collections"] => collections(),
         ["info", d] => with_dev(&opts, d, info),
         ["battery", d] => with_dev(&opts, d, |h, dev| {
@@ -110,6 +139,81 @@ fn with_dev(o: &Opts, sel: &str, f: impl FnOnce(&mut Hidpp, u8) -> Result<(), Er
     let (pid, dev) = parse_selector(sel).ok_or_else(|| Error::Other(format!("bad device selector `{sel}`")))?;
     let mut h = device::open(pid, o.swid, o.trace)?;
     f(&mut h, dev)
+}
+
+fn presets(o: &Opts) -> Result<(), Error> {
+    let path = o.config_path()?;
+    let list = config::load(&path).map_err(Error::Other)?;
+    println!("file       {}", path.display());
+    if list.is_empty() {
+        println!("(no presets)");
+    }
+    for p in &list {
+        println!("{}", config::line(p));
+    }
+    Ok(())
+}
+
+/// `preset <dev> [dpi=N] [rate=HZ]` or `preset <dev> clear`: keyed by the device's model ID,
+/// so the same preset applies over the cable and the receiver.
+fn preset(o: &Opts, sel: &str, rest: &[&str]) -> Result<(), Error> {
+    let path = o.config_path()?;
+    let mut list = config::load(&path).map_err(Error::Other)?;
+    let mut new = None;
+    let mut changed = false;
+    with_dev(o, sel, |h, dev| {
+        let model = device::model_id(h, dev)?;
+        if rest.is_empty() {
+            match list.iter().find(|p| p.model == model) {
+                Some(p) => println!("preset     {}", config::line(p)),
+                None => println!("no preset for model {model:04x}"),
+            }
+            return Ok(());
+        }
+        changed = true;
+        if rest == ["clear"] {
+            list.retain(|p| p.model != model);
+            println!("cleared preset for model {model:04x}");
+            return Ok(());
+        }
+        let mut p = config::parse(&format!("{model:04x} {}", rest.join(" ")))
+            .map_err(|e| Error::Other(e.replace("line 1: ", "")))?
+            .remove(0);
+        if let Some(v) = p.dpi {
+            let caps = device::dpi(h, dev)?.caps;
+            if !caps.allows(v) {
+                return Err(Error::Other(format!("{v} DPI is not allowed by the device ({caps})")));
+            }
+        }
+        // Keep fields not given now from the existing preset.
+        if let Some(old) = list.iter().find(|x| x.model == model) {
+            p.dpi = p.dpi.or(old.dpi);
+            p.rate = p.rate.or(old.rate);
+        }
+        list.retain(|x| x.model != model);
+        list.push(p.clone());
+        new = Some(p);
+        Ok(())
+    })?;
+    if changed {
+        config::save(&path, &list).map_err(Error::Other)?;
+    }
+    if let Some(p) = new {
+        println!("saved      {}", config::line(&p));
+        println!("file       {}", path.display());
+    }
+    Ok(())
+}
+
+fn apply(h: &mut Hidpp, dev: u8, path: &std::path::Path) -> Result<(), Error> {
+    let model = device::model_id(h, dev)?;
+    let list = config::load(path).map_err(Error::Other)?;
+    let p = list
+        .iter()
+        .find(|p| p.model == model)
+        .ok_or_else(|| Error::Other(format!("no preset for model {model:04x} in {}", path.display())))?;
+    println!("applied    {}", config::apply(h, dev, p)?);
+    Ok(())
 }
 
 fn collections() -> Result<(), Error> {

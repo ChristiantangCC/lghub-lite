@@ -21,6 +21,7 @@ Tags: `[OBS]` seen in G HUB, `[PUB]` public HID++ knowledge (Solaar/libratbag), 
 | `rate <dev> [hz]` | ✅ 0x8061 read/write with read-back in host mode, over the cable and the receiver. The Hz mapping is [PUB] and unmeasured |
 | `mode <dev> [host\|onboard]` | ✅ 0x8100 get/set with read-back, over the cable and the receiver |
 | `watch` | ✅ event-driven monitor: device arrival/removal, receiver slot connect/disconnect (incl. sleep/wake), DPI/rate/battery events. Idle CPU 0, one thread. Human-run hot-plug test passed (TEST REQUEST 5) |
+| `preset <dev> [dpi=N] [rate=HZ] \| clear`, `presets`, `apply <dev>` | ✅ per-model presets in `%APPDATA%\lghub-lite\presets.txt` (`--config` overrides). `apply` and `watch` switch to host mode and set DPI/rate with read-back (SL2 over the receiver) |
 | `raw <dev> <hex…> --allow-raw` | implemented, debug only |
 | `--trace` | prints every sent/received report in hex; reports that don't match the pending request are marked `(ignored)` |
 
@@ -36,7 +37,8 @@ Single binary crate, no traits, no async:
   - `Notifier` wraps `CM_Register_Notification` for HID interface arrival/removal.
 - `src/hidpp.rs`: framing, swid, reply matching, error decoding, retries, queue of unsolicited reports, Root/ping, feature names.
 - `src/device.rs`: interface grouping, receiver slots, identity, battery, DPI, report rate, onboard mode, event decoding.
-- `src/watch.rs`: the `watch` loop.
+- `src/watch.rs`: the `watch` loop; applies presets on every attach.
+- `src/config.rs`: preset file parse/format, atomic save (write `.tmp`, then rename), apply.
 - `src/main.rs`: argument parsing and output.
 
 **Threads.** Our code runs on one thread. Windows runs the `CM_Register_Notification` callback on a thread-pool thread. The callback only calls `SetEvent`, and the main thread waits on that event; no window or message loop is needed. While idle the process has 1 thread [HW, see §8].
@@ -107,6 +109,18 @@ HID++ 2.0 events have swid 0 and fn 0 on a known feature index [OBS §9.5].
   - f0 → `[count, unitId(4), transport(2), modelId(6), …]`. SL2 model IDs are 40A9 (wireless) and C09B (wired).
   - f1 `[e]` → `[type&0x0F, prefix(3 ASCII), number, revision, build BE16, active, transportPid BE16, …]`. SL2: bootloader BL1 71.05 B0029, main MPM 32.05 B0029.
   - **Agent cross-check:** the headset decodes to `U112.01.B0203`; the agent reports `U112` / `112.1.203`. ✅
+
+### Presets
+- **Key.** Presets are keyed by the device's **first non-zero model ID** from FirmwareInfo f0, `p[7..13]` as three BE16 values. [OBS §9.7; PUB layout] [HW]
+  - SL2 = **40A9**: `02 7A F4 AD 28 00 0C 40 A9 C0 9B 00 00 …`.
+  - Headset = **0ABA**: `01 FF FF FF FF 00 03 00 00 00 00 0A BA …`.
+  - The key is meant to be the same over the cable and the receiver (the device reports it, not the transport). So far it has only been read over the receiver for the SL2 [UNVERIFIED over the cable].
+- **File format.** One line per model: `40a9 dpi=1200 rate=500`. `#` starts a comment.
+  - `preset` rewrites the whole file, so hand-written comments are lost; the header says so.
+  - Rates must be 125 << n (n = 0..6). DPI is validated against the device's own range list when saved via `preset`.
+- **Apply sequence.** If the device has 0x8100 and is not in host mode, set host mode. Then set DPI and rate only where they differ, checking each by read-back.
+  - A rate the active connection doesn't offer (e.g. 2000 Hz over the cable) is skipped with a message.
+  - In `watch` failures are printed, never fatal.
 
 ### Battery
 - **0x1004 f1** → `[soc %, level bits (b0 crit, b1 low, b2 good, b3 full), charging, external]`. [OBS §10.5 order, PUB bytes] [HW SL2]
@@ -189,8 +203,9 @@ No `clap`, `serde`, logging crates or async runtime. Dev-only research tool: `to
 | 2026-10-15 | SL2 | LIGHTSPEED | report rate with connType fix: host → 500 → 1000 → onboard | ✅ read-back 500 then 1000; wireless bitmap 125–8000 Hz; final state onboard, 1000 Hz |
 | 2026-10-15 | SL2 | LIGHTSPEED | `watch` idle 30 s | ✅ 0 ms CPU, 1 thread, 5.6 MB working set |
 | 2026-10-15 | SL2 + receiver | LIGHTSPEED / cable | human run of TEST REQUEST 5 with `watch`: mouse off/on, cable in/out, receiver out/in, idle sleep then move | ✅ 0x41 link lost/connected on power cycle and on sleep/wake; re-announced DPI/rate/battery events; receiver and cable removal (os error 1167) and arrival; slot ping before link-up answered 0x08 |
+| 2026-10-15 | SL2 | LIGHTSPEED | presets: save 1200/500 (scratch file), reject dpi=50, `apply` twice, then onboard mode and `watch` start-up | ✅ apply: "host mode, dpi 1200, rate 500", then "(already)" on the second run; `watch` applied the same at start-up and printed the device's DPI/rate events; restored onboard, 800, 1000 Hz |
 | 2026-10-15 | headset 0aba | USB (own dongle) | ping, name, type, firmware, features | ✅ firmware matches agent |
-| — | — | — | `cargo test`: 20 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
+| — | — | — | `cargo test`: 24 offline byte-exact tests (fixtures from §9 and the [HW] traces above) | ✅ |
 
 All tests ran with G HUB running. G HUB does not manage the SL2.
 
@@ -209,6 +224,16 @@ All tests ran with G HUB running. G HUB does not manage the SL2.
 
 TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on 2026-10-15; see §5.
 
+**TEST REQUEST 6: presets applied on reconnect.** G HUB can stay open.
+- Commands:
+  1. `lghub-lite preset c54d:1 dpi=1600 rate=1000` (or any values you like).
+  2. Start `lghub-lite watch` and leave it running.
+  3. Switch the mouse off and on; separately, let it sleep and then move it.
+- Expected: after each `slot 1: connected`, a line `preset applied: …`.
+  - If `host mode` appears in that list after a power cycle, host mode does **not** survive a power cycle; that answers the open question in §7.
+- Over the cable, use `c09b` once to confirm the same preset (model 40a9) is found there.
+- Restore: `lghub-lite preset c54d:1 clear`, then `lghub-lite mode c54d:1 onboard`.
+
 ## 7. Open questions
 - Does host mode (0x8100 = 2) persist across a power cycle or a cable unplug? [UNK]
 - **0x8061:** the bit → Hz mapping is only [PUB] (TEST REQUEST 4). How should connType be chosen for direct Bluetooth devices? [UNK]
@@ -222,7 +247,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 ## 8. Metrics (2026-10-15, release: opt-level "s", LTO, codegen-units 1, panic=abort, strip)
 | Metric | Value |
 |---|---|
-| `lghub-lite.exe` size | **203,264 B** with `watch` (191,488 B before; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
+| `lghub-lite.exe` size | **244,736 B** with presets (+41 KB). The growth is std's file and path code (`read_to_string`, `create_dir_all`, `rename`, `PathBuf`), which persistence needs and which is still smaller than any config crate; no new dependencies. Before: 203,264 B with `watch` (191,488 B before that; opt-level 3 measured earlier at 201,728 B vs 184,832 B, so we keep "s") |
 | Crates in tree | 3 (`lghub-lite`, `windows-sys`, `windows-link`) |
 | `devices` wall time | median 105 ms, min 101 ms (10 runs; SL2 wired + headset, includes HID++ round trips) |
 | `collections` wall time (enumeration only) | median 49 ms |

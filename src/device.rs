@@ -256,6 +256,24 @@ pub fn firmware(h: &mut Hidpp, dev: u8) -> Result<Vec<Firmware>, Error> {
     Ok(out)
 }
 
+/// First non-zero model ID from FirmwareInfo f0:
+/// `[count, unitId(4), transport(2), modelId(2) × 3, …]`. [OBS §9.7 model ID read; PUB layout]
+/// [HW SL2 over the receiver: `02 7A F4 AD 28 00 0C 40 A9 C0 9B 00 00 …` -> 0x40A9;
+/// headset: `01 FF FF FF FF 00 03 00 00 00 00 0A BA …` -> 0x0ABA]
+pub fn parse_model_id(p: &[u8]) -> Result<u16, Error> {
+    need(p, 13)?;
+    [7, 9, 11]
+        .iter()
+        .map(|&i| u16::from_be_bytes([p[i], p[i + 1]]))
+        .find(|&m| m != 0)
+        .ok_or(Error::BadReply("no model ID"))
+}
+
+pub fn model_id(h: &mut Hidpp, dev: u8) -> Result<u16, Error> {
+    let fi = h.feature(dev, 0x0003)?;
+    parse_model_id(&h.call(dev, fi, 0, &[], &[])?)
+}
+
 pub fn firmware_kind_name(k: u8) -> &'static str {
     match k {
         0 => "main",
@@ -849,6 +867,21 @@ mod tests {
         ];
         assert_eq!(parse_2202_params(&after).unwrap(), (1600, 800, 1600, 2));
         assert!(parse_2202_params(&after[..9]).is_err());
+    }
+
+    #[test]
+    fn model_id_from_firmware_info() {
+        // [HW] SL2 and headset FirmwareInfo f0 replies
+        let sl2 = [
+            0x02, 0x7A, 0xF4, 0xAD, 0x28, 0x00, 0x0C, 0x40, 0xA9, 0xC0, 0x9B, 0x00, 0x00, 0x00, 0x01, 0x00,
+        ];
+        assert_eq!(parse_model_id(&sl2).unwrap(), 0x40A9);
+        let headset = [
+            0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x03, 0, 0, 0, 0, 0x0A, 0xBA, 0, 0, 0,
+        ];
+        assert_eq!(parse_model_id(&headset).unwrap(), 0x0ABA);
+        assert!(parse_model_id(&[0; 16]).is_err());
+        assert!(parse_model_id(&sl2[..12]).is_err());
     }
 
     #[test]

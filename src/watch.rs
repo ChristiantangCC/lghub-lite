@@ -1,9 +1,14 @@
 //! `watch`: long-running, event-driven monitor. The main thread blocks in a single
 //! WaitForMultipleObjects on every open HID++ collection plus the PnP notification event,
 //! so it uses no CPU while nothing happens. There is no polling.
+//! Whenever a device attaches (start-up, plug-in, receiver link-up, wake from sleep) its preset
+//! from the preset file is applied; the file is re-read each time, so edits need no restart.
+
+use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::System::Threading::INFINITE;
 
+use crate::config;
 use crate::device::{self, EVENT_FEATURES, Event};
 use crate::hid::{self, Notifier, Wake};
 use crate::hidpp::{self, DIRECT, Error, GET_REGISTER, Hidpp};
@@ -22,6 +27,7 @@ struct Live {
     product: String,
     h: Hidpp,
     devs: Vec<Dev>,
+    presets: PathBuf,
 }
 
 impl Live {
@@ -34,10 +40,11 @@ impl Live {
     }
 }
 
-pub fn run(swid: u8, trace: bool) -> Result<(), Error> {
+pub fn run(swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
     let notifier = Notifier::hid().map_err(|e| Error::Io(e.to_string()))?;
     let mut live: Vec<Live> = Vec::new();
-    sync(&mut live, swid, trace)?;
+    println!("presets    {}", presets.display());
+    sync(&mut live, swid, trace, presets)?;
     println!("watching for device and setting changes (Ctrl+C to stop)");
     loop {
         // Reports that arrived while a transaction was waiting for its reply.
@@ -77,14 +84,14 @@ pub fn run(swid: u8, trace: bool) -> Result<(), Error> {
                 // One plug-in raises several interface notifications; let them settle, then
                 // re-enumerate once.
                 notifier.settle(300);
-                sync(&mut live, swid, trace)?;
+                sync(&mut live, swid, trace, presets)?;
             }
         }
     }
 }
 
 /// Re-enumerate HID++ interfaces: drop the ones that disappeared, open and describe new ones.
-fn sync(live: &mut Vec<Live>, swid: u8, trace: bool) -> Result<(), Error> {
+fn sync(live: &mut Vec<Live>, swid: u8, trace: bool, presets: &Path) -> Result<(), Error> {
     let ifs = device::interfaces()?;
     let keys: Vec<String> = ifs.iter().map(|f| device::group_key(&f.cols[0].path)).collect();
     live.retain(|l| {
@@ -106,6 +113,7 @@ fn sync(live: &mut Vec<Live>, swid: u8, trace: bool) -> Result<(), Error> {
                     product: f.product.clone(),
                     h,
                     devs: Vec::new(),
+                    presets: presets.to_path_buf(),
                 };
                 describe(&mut l);
                 live.push(l);
@@ -168,6 +176,36 @@ fn attach(l: &mut Live, index: u8) {
     println!("+ {sel:<8} {name}  (HID++ {maj}.{min}){battery}");
     l.devs.retain(|d| d.index != index);
     l.devs.push(Dev { index, feats });
+    apply_preset(l, index);
+}
+
+/// Apply this device's preset, if any. Errors are reported, never fatal: `watch` keeps running.
+fn apply_preset(l: &mut Live, index: u8) {
+    let sel = l.sel(index);
+    let list = match config::load(&l.presets) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("  {sel:<8} presets not loaded: {e}");
+            return;
+        }
+    };
+    if list.is_empty() {
+        return;
+    }
+    let model = match device::model_id(&mut l.h, index) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("  {sel:<8} model ID unknown, preset not applied: {e}");
+            return;
+        }
+    };
+    let Some(p) = list.iter().find(|p| p.model == model) else {
+        return;
+    };
+    match config::apply(&mut l.h, index, p) {
+        Ok(s) => println!("  {sel:<8} preset applied: {s}"),
+        Err(e) => println!("  {sel:<8} preset failed: {e}"),
+    }
 }
 
 fn handle(l: &mut Live, r: &[u8], trace: bool) {
