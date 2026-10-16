@@ -62,6 +62,26 @@ jobs:
       - name: Release package (the Release workflow's script, so packaging breaks show here)
         run: sh packaging/package-linux.sh ci
 
+  macos:
+    # Tested on hardware (MX Master 4 over Bluetooth) by hand; here built, linted and tested.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: gui
+      - run: cargo test
+        working-directory: gui
+      - run: cargo build --release
+        working-directory: gui
+      - name: Release package (the Release workflow's script, so packaging breaks show here)
+        run: sh packaging/package-macos.sh ci
+
   msrv:
     # The core's rust-version (CLI + background watcher) must really build.
     # The app follows eframe's own minimum (see gui/Cargo.toml).

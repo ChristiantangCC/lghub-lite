@@ -8,7 +8,7 @@ use eframe::egui::{
     pos2, vec2,
 };
 use eframe::epaint::Shadow;
-use lghub_lite::device::{MODE_HOST, MODE_ONBOARD};
+use lghub_lite::device::{MODE_HOST, MODE_ONBOARD, is_bluetooth_pid};
 use lghub_lite::watch::Cmd;
 
 use crate::fonts::{GROTESK, MONO, MONO_SEMIBOLD, PIXEL, SANS, SANS_MEDIUM, SANS_SEMIBOLD, font};
@@ -296,6 +296,7 @@ impl App {
         let drain = r.history.drain_tenths(now).filter(|_| !charging);
         let conn = match r.sel.split_once(':') {
             Some((_, slot)) => format!("Receiver · slot {slot}"),
+            None if u16::from_str_radix(&r.sel, 16).is_ok_and(is_bluetooth_pid) => "Bluetooth".into(),
             None => "USB receiver".into(),
         };
         let voltage = snap.and_then(|s| s.voltage_mv);

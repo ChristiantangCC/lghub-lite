@@ -1,5 +1,6 @@
-//! Linux: localtime_r, XDG config dir, flock-based instance locks, dup2, xdg-open.
-//! [INF] Written without Linux hardware; covered by unit tests and CI only.
+//! Linux and macOS: localtime_r, the settings folder (XDG on Linux, Application Support on
+//! macOS), flock-based instance locks, dup2, xdg-open / open.
+//! [INF] The Linux side was written without Linux hardware; covered by unit tests and CI only.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -22,7 +23,15 @@ pub fn local_time() -> [u16; 6] {
     }
 }
 
+/// `~/Library/Application Support/lghub-lite`.
+#[cfg(target_os = "macos")]
+pub fn config_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    Some(home.join("Library/Application Support/lghub-lite"))
+}
+
 /// `$XDG_CONFIG_HOME/lghub-lite`, else `~/.config/lghub-lite`.
+#[cfg(not(target_os = "macos"))]
 pub fn config_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -31,11 +40,15 @@ pub fn config_dir() -> Option<PathBuf> {
     Some(base.join("lghub-lite"))
 }
 
-/// Where lock files live: `$XDG_RUNTIME_DIR` (per user, per session), else the config dir.
+/// Where lock files live: `$XDG_RUNTIME_DIR` (per user, per session; on macOS `$TMPDIR`,
+/// which is per user), else the config dir.
 fn lock_path(name: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .or_else(config_dir)?;
+    let runtime = if cfg!(target_os = "macos") {
+        "TMPDIR"
+    } else {
+        "XDG_RUNTIME_DIR"
+    };
+    let dir = std::env::var_os(runtime).map(PathBuf::from).or_else(config_dir)?;
     let _ = std::fs::create_dir_all(&dir);
     Some(dir.join(format!("lghub-lite-{name}.lock")))
 }
@@ -87,7 +100,8 @@ pub fn redirect_stdio(file: &File) {
 
 /// Show `dir` in the file manager.
 pub fn open_folder(dir: &Path) {
-    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let _ = std::process::Command::new(opener).arg(dir).spawn();
 }
 
 #[cfg(test)]

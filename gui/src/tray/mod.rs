@@ -1,11 +1,12 @@
-//! The tray icon: tray-icon on Windows, a StatusNotifierItem (ksni) on Linux.
+//! The tray icon: tray-icon on Windows and macOS (menu bar), a StatusNotifierItem (ksni) on
+//! Linux.
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(windows)]
-mod windows;
+#[cfg(any(windows, target_os = "macos"))]
+mod native;
 
 #[cfg(target_os = "linux")]
 pub use linux::*;
-#[cfg(windows)]
-pub use windows::*;
+#[cfg(any(windows, target_os = "macos"))]
+pub use native::*;

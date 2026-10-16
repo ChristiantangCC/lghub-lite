@@ -39,7 +39,8 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
 
 <dev> is PID[:INDEX] as printed by `devices`, e.g. c54d:1 (receiver slot 1) or 0aba.
 Presets live in presets.txt in the settings folder (Windows: %APPDATA%\\lghub-lite,
-Linux: ~/.config/lghub-lite) unless --config is given.";
+Linux: ~/.config/lghub-lite, macOS: ~/Library/Application Support/lghub-lite) unless
+--config is given.";
 
 struct Opts {
     trace: bool,
@@ -417,7 +418,12 @@ fn devices(o: &Opts) -> Result<(), Error> {
         match h.ping(DIRECT, 0x5A) {
             Ok((maj, min)) => {
                 let name = device::name(&mut h, DIRECT).unwrap_or_else(|_| f.product.clone());
-                println!("{:04x}      {name}  (HID++ {maj}.{min}, direct)", f.pid);
+                let link = if device::is_bluetooth_pid(f.pid) {
+                    "bluetooth"
+                } else {
+                    "direct"
+                };
+                println!("{:04x}      {name}  (HID++ {maj}.{min}, {link})", f.pid);
             }
             Err(Error::Hpp10(_)) => {
                 // HID++ 1.0 answer to a 2.0 ping: this is a receiver. [OBS §9.6]

@@ -47,6 +47,12 @@ pub fn interfaces() -> Result<Vec<Iface>, Error> {
     Ok(out.into_iter().map(|(_, g)| g).collect())
 }
 
+/// Is `pid` a device connected directly over Bluetooth? Logitech gives its Bluetooth (LE)
+/// devices product IDs 0xB0xx..0xBFxx. [PUB Solaar descriptors] [HW MX Master 4: b042]
+pub fn is_bluetooth_pid(pid: u16) -> bool {
+    pid & 0xF000 == 0xB000
+}
+
 /// `PID` or `PID:INDEX` in hex/decimal, e.g. `c54d:1`, `0aba`.
 pub fn parse_selector(s: &str) -> Option<(u16, u8)> {
     let (pid, idx) = match s.split_once(':') {
@@ -828,6 +834,7 @@ mod tests {
     fn selectors() {
         assert_eq!(parse_selector("c54d:1"), Some((0xC54D, 1)));
         assert_eq!(parse_selector("0aba"), Some((0x0ABA, 0xFF)));
+        assert!(is_bluetooth_pid(0xB042) && !is_bluetooth_pid(0xC54D) && !is_bluetooth_pid(0x0ABA));
         assert_eq!(parse_selector("c54d:7"), None);
         assert_eq!(parse_selector("zz"), None);
     }

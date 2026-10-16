@@ -1,6 +1,6 @@
 //! Thin HID layer: enumerate HID++ collections, open them, read/write reports with timeouts,
 //! and wait on several devices plus other signals at once. One API, a backend per OS:
-//! Windows (SetupDi/HidD, overlapped I/O) and Linux (hidraw, poll).
+//! Windows (SetupDi/HidD, overlapped I/O), Linux (hidraw, poll) and macOS (IOHIDDevice, poll).
 
 use std::io;
 
@@ -9,14 +9,18 @@ pub mod descriptor;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{Handle, Notifier, RawWaitable, Waker, enumerate, wait_any};
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{Handle, Notifier, RawWaitable, Waker, enumerate, wait_any};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::{Handle, Notifier, RawWaitable, Waker, enumerate, wait_any};
 
 /// One HID top-level collection. Windows exposes each collection as its own device path;
-/// on Linux one hidraw node carries all collections of an interface, so several `Info`s
-/// share a `path`.
+/// on Linux (a hidraw node) and macOS (an IOHIDDevice) one path carries all collections of an
+/// interface, so several `Info`s share a `path`.
 #[derive(Debug, Clone)]
 pub struct Info {
     pub path: String,
@@ -45,11 +49,11 @@ pub enum Wake {
 }
 
 /// Something `wait_any` can wait on besides device reads (PnP notifier, cross-thread waker):
-/// a Win32 event handle on Windows, a pollable file descriptor on Linux.
+/// a Win32 event handle on Windows, a pollable file descriptor on Linux and macOS.
 pub trait Signal {
     fn raw(&self) -> RawWaitable;
-    /// Reset after a wake-up. Windows events reset themselves; a Linux eventfd or socket stays
-    /// readable until read.
+    /// Reset after a wake-up. Windows events reset themselves; a Linux eventfd or socket, or a
+    /// macOS pipe, stays readable until read.
     fn consume(&self) {}
 }
 
@@ -57,7 +61,7 @@ impl Signal for Waker {
     fn raw(&self) -> RawWaitable {
         self.raw_waitable()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn consume(&self) {
         Waker::consume(self)
     }
@@ -67,7 +71,7 @@ impl Signal for Notifier {
     fn raw(&self) -> RawWaitable {
         self.raw_waitable()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn consume(&self) {
         Notifier::consume(self)
     }

@@ -389,11 +389,19 @@ fn open_hint(path: &str, e: std::io::Error) -> String {
         Some(32) => " (sharing violation: another program opened it without sharing)",
         _ => "",
     };
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     let hint = match e.kind() {
         std::io::ErrorKind::PermissionDenied => {
             " (permission denied: install the udev rule packaging/linux/70-lghub-lite.rules, see the README)"
         }
+        _ => "",
+    };
+    #[cfg(target_os = "macos")]
+    let hint = match e.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            " (not permitted: allow this terminal or app under System Settings > Privacy & Security > Input Monitoring)"
+        }
+        std::io::ErrorKind::ResourceBusy => " (another program, e.g. Logi Options+, holds the device exclusively)",
         _ => "",
     };
     format!("open {path}: {e}{hint}")

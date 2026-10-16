@@ -48,8 +48,26 @@ jobs:
           name: linux
           path: lghub-lite-*-linux-x64-experimental.tar.gz*
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - run: cargo build --release
+      - run: cargo test
+        working-directory: gui
+      - run: cargo build --release
+        working-directory: gui
+      - name: Package
+        run: sh packaging/package-macos.sh "${{ github.ref_name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: lghub-lite-*-macos-*.tar.gz*
+
   publish:
-    needs: [windows, linux]
+    needs: [windows, linux, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

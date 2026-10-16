@@ -19,7 +19,8 @@ pub struct Preset {
 }
 
 /// `presets.txt` in the settings folder: `%APPDATA%\lghub-lite` on Windows,
-/// `$XDG_CONFIG_HOME/lghub-lite` (or `~/.config/lghub-lite`) on Linux.
+/// `$XDG_CONFIG_HOME/lghub-lite` (or `~/.config/lghub-lite`) on Linux,
+/// `~/Library/Application Support/lghub-lite` on macOS.
 pub fn default_path() -> Option<PathBuf> {
     crate::platform::config_dir().map(|d| d.join("presets.txt"))
 }

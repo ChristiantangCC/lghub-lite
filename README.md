@@ -18,6 +18,12 @@ usually be listed and readable, but writes are only verified where marked.
 
 - **Windows 10/11**: supported and tested on hardware (the CLI, the background watcher and
   the app).
+- **macOS (Apple Silicon; Intel builds from source)**: tested on hardware with an MX Master 4
+  over Bluetooth (the CLI, the background watcher, login autostart and the app with a menu bar
+  item). Receivers and headsets use the same code as on Windows but have not been tried on a
+  Mac yet. Setup: [packaging/macos/INSTALL-macos.md](packaging/macos/INSTALL-macos.md).
+  Settings live in `~/Library/Application Support/lghub-lite/` where this README says
+  `%APPDATA%\lghub-lite\`.
 - **Linux (x86-64)**: **experimental, untested on hardware.** The CLI, the background watcher
   and the app all build for Linux (hidraw for the devices, a StatusNotifierItem tray icon, XDG
   autostart), and every automatic test passes there, but nobody has tried them with a real
@@ -39,10 +45,11 @@ folder**; the rest builds and works the same, with a single dependency.
 | PRO X SUPERLIGHT 2 | LIGHTSPEED receiver, USB cable | list, info, battery, DPI read/write, report rate read/write, onboard mode, presets, connect/disconnect events, onboard memory read/backup |
 | PRO X Wireless headset | its USB dongle | list, info, battery percentage from the voltage (estimated until a discharge is measured, see below), equalizer (read-only) |
 | PRO X SUPERLIGHT | LIGHTSPEED receiver | list, info, battery, DPI, report rate (tested by a user; it calls itself "PRO X Wireless") |
+| MX Master 4 | Bluetooth LE (macOS) | list, info, battery, DPI read/write (feature 0x2201), presets, background watcher, the app. It has no report rate or onboard profiles to set |
 | PRO X 2 LIGHTSPEED headset | its USB dongle | **experimental**: battery and charging state in the CLI, the app and the tray, over Logitech's newer "Centurion" protocol (battery read confirmed by a user's report) |
 
 Have a different device, or one that does not work? On Windows, double-click **`diagnose.cmd`**
-in the lghub-lite folder (on Linux: `./lghub-lite report > report.txt`). It collects everything
+in the lghub-lite folder (on Linux and macOS: `./lghub-lite report > report.txt`). It collects everything
 needed in one file, including a trace of any step that fails, and opens it. Send that file with
 a [device report](../../issues/new?template=device-report.md). That is how the table grows.
 
@@ -57,6 +64,11 @@ a [device report](../../issues/new?template=device-report.md). That is how the t
 **Linux (experimental)**: download `lghub-lite-<version>-linux-x64-experimental.tar.gz`,
 unpack it and follow its `INSTALL-linux.md`. The one required step is a udev rule, so that
 your user may open the devices without root.
+
+**macOS**: download `lghub-lite-<version>-macos-arm64.tar.gz`, unpack it and follow its
+`INSTALL-macos.md`. The one required step is clearing the download quarantine
+(`xattr -dr com.apple.quarantine <folder>`), since the files are not notarised. No
+permission prompt or driver is needed.
 
 The executables are not code-signed, so Windows SmartScreen may warn the first time; choose
 "More info" → "Run anyway", or build from source (below).
@@ -244,7 +256,8 @@ cargo build --release
 
 builds `lghub-lite` (CLI) and `lghub-lite-bg` (background watcher) in `target/release/`. They
 need Rust 1.88+ and have a single dependency: [`windows-sys`](https://crates.io/crates/windows-sys)
-on Windows, [`libc`](https://crates.io/crates/libc) on Linux.
+on Windows, [`libc`](https://crates.io/crates/libc) on Linux and macOS (macOS also links the
+system IOKit and CoreFoundation frameworks).
 
 The app is its own project in `gui/` (it uses the CLI's code as a library):
 
@@ -255,7 +268,8 @@ cargo build --release
 
 builds `gui/target/release/lghub-lite-gui`. It uses [egui](https://github.com/emilk/egui) and
 needs Rust 1.95+; the tray icon comes from [tray-icon](https://crates.io/crates/tray-icon) on
-Windows and [ksni](https://crates.io/crates/ksni) (D-Bus, no GTK) on Linux.
+Windows and macOS (a menu bar item) and [ksni](https://crates.io/crates/ksni) (D-Bus, no GTK)
+on Linux.
 `lghub-lite-gui.exe --demo` shows sample devices without touching any hardware (that is how the
 screenshots above were made).
 

@@ -1,13 +1,13 @@
 //! Small OS services: local time, the settings folder, single-instance locks, routing stdout
 //! to a log file, opening a folder in the file manager, executable names.
 
-#[cfg(target_os = "linux")]
-mod linux;
+#[cfg(unix)]
+mod unix;
 #[cfg(windows)]
 mod windows;
 
-#[cfg(target_os = "linux")]
-pub use linux::*;
+#[cfg(unix)]
+pub use unix::*;
 #[cfg(windows)]
 pub use windows::*;
 

@@ -46,44 +46,7 @@ pub fn status() -> io::Result<Option<String>> {
     }
 }
 
-/// Split a command line with double-quoted parts into its arguments.
-fn split(command: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let (mut quoted, mut any) = (false, false);
-    for c in command.chars() {
-        match c {
-            '"' => {
-                quoted = !quoted;
-                any = true;
-            }
-            ' ' if !quoted => {
-                if any || !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                any = false;
-            }
-            c => cur.push(c),
-        }
-    }
-    if any || !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-/// Start `command` now, detached from this process.
-pub fn start(command: &str) -> io::Result<()> {
-    let args = split(command);
-    let (prog, rest) = args.split_first().ok_or_else(|| io::Error::other("empty command"))?;
-    std::process::Command::new(prog)
-        .args(rest)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-}
+pub use super::unix::start;
 
 /// Stop every running process of this user named `exe_name` (SIGTERM). Returns how many.
 pub fn stop_running(exe_name: &str) -> io::Result<u32> {
@@ -123,12 +86,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_lines_and_entries() {
-        assert_eq!(
-            split(r#""/opt/lghub lite/lghub-lite-bg" --config "/home/a b/p.txt""#),
-            ["/opt/lghub lite/lghub-lite-bg", "--config", "/home/a b/p.txt"]
-        );
-        assert_eq!(split("a  b"), ["a", "b"]);
+    fn desktop_entry() {
         let e = entry(r#""/x/lghub-lite-gui" --tray"#);
         assert!(e.contains("\nExec=\"/x/lghub-lite-gui\" --tray\n"));
     }

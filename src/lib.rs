@@ -1,4 +1,4 @@
-//! lghub-lite: talks HID++ directly to Logitech mice and headsets (Windows; Linux experimental).
+//! lghub-lite: talks HID++ directly to Logitech mice and headsets (Windows, macOS; Linux experimental).
 //! Shared by the `lghub-lite` CLI and the windowless `lghub-lite-bg` watcher.
 //! Not affiliated with or endorsed by Logitech. Protocol evidence: NOTES.md.
 

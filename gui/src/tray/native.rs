@@ -1,4 +1,5 @@
-//! Windows tray icon (tray-icon crate): Open / Skins… / Quit menu, left click opens.
+//! Windows tray icon and macOS menu bar item (tray-icon crate): Open / Skins… / Quit menu,
+//! left click opens.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
