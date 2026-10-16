@@ -39,7 +39,7 @@ folder**; the rest builds and works the same, with a single dependency.
 | PRO X SUPERLIGHT 2 | LIGHTSPEED receiver, USB cable | list, info, battery, DPI read/write, report rate read/write, onboard mode, presets, connect/disconnect events, onboard memory read/backup |
 | PRO X Wireless headset | its USB dongle | list, info, battery percentage from the voltage (estimated until a discharge is measured, see below), equalizer (read-only) |
 | PRO X SUPERLIGHT | LIGHTSPEED receiver | list, info, battery, DPI, report rate (tested by a user; it calls itself "PRO X Wireless") |
-| PRO X 2 LIGHTSPEED headset | its USB dongle | **experimental**, command line only: list and battery with charging state, over Logitech's newer "Centurion" protocol; not confirmed on hardware yet |
+| PRO X 2 LIGHTSPEED headset | its USB dongle | **experimental**: battery and charging state in the CLI, the app and the tray, over Logitech's newer "Centurion" protocol (battery read confirmed by a user's report) |
 
 Have a different device, or one that does not work? On Windows, double-click **`diagnose.cmd`**
 in the lghub-lite folder (on Linux: `./lghub-lite report > report.txt`). It collects everything

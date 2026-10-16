@@ -113,7 +113,12 @@ fn parse_bridged(f: &[u8], bridge: u8, sub_index: u8) -> Bridged {
     if f[4] & 0x0F == SWID {
         return Bridged::Ack;
     }
-    if f[8] == 0xFF || f[7] != 0 {
+    if f[8] == 0xFF {
+        // HID++-style error from the headset: [0xFF, index, function, code] from byte 8
+        // [HW user report: `51 0A 00 03 10 00 05 00 FF 00 01 05` for an absent feature]
+        return Bridged::Rejected(*f.get(11).unwrap_or(&0));
+    }
+    if f[7] != 0 {
         return Bridged::Rejected(f[7]);
     }
     if f[8] == sub_index {
@@ -208,8 +213,13 @@ impl Centurion {
     }
 
     /// The headset's index for feature `id` (Root GetFeature through the bridge).
+    /// A refused lookup also means "not present" [HW user report: the PRO X 2 rejects
+    /// GetFeature for features it lacks instead of answering index 0].
     pub fn feature(&mut self, id: u16) -> Result<u8, Error> {
-        let r = self.headset(0, 0, &id.to_be_bytes())?;
+        let r = match self.headset(0, 0, &id.to_be_bytes()) {
+            Err(Error::Hpp20(_)) => return Err(Error::NoFeature(id)),
+            r => r?,
+        };
         match r.first() {
             Some(&i) if i != 0 => Ok(i),
             _ => Err(Error::NoFeature(id)),
@@ -293,8 +303,11 @@ mod tests {
             ),
             _ => panic!("expected data"),
         }
+        // a real rejection frame from a PRO X 2 LIGHTSPEED (absent feature)
+        let mut rej = [0u8; 64];
+        rej[..12].copy_from_slice(&[0x51, 0x0A, 0x00, 0x03, 0x10, 0x00, 0x05, 0x00, 0xFF, 0x00, 0x01, 0x05]);
+        assert!(matches!(parse_bridged(&rej, 3, 0), Bridged::Rejected(5)));
         data[8] = 0xFF;
-        assert!(matches!(parse_bridged(&data, 2, 7), Bridged::Rejected(_)));
         assert!(matches!(parse_bridged(&data, 3, 7), Bridged::Unrelated));
         assert!(parse_battery(&[101, 0, 0]).is_err());
     }

@@ -369,6 +369,7 @@ fn centurion_probe(info: &hid::Info, trace: bool, retrace: bool) -> Result<(), E
         |c: &mut centurion::Centurion, what: &str, f: &dyn Fn(&mut centurion::Centurion) -> Result<String, Error>| {
             match f(c) {
                 Ok(v) => println!("{what:<20} {v}"),
+                Err(Error::NoFeature(_)) => println!("{what:<20} not present"),
                 Err(e) => {
                     println!("{what:<20} error: {e}");
                     if retrace && !c.trace {

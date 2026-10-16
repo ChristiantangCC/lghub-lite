@@ -244,8 +244,13 @@ All [INF]: written without Linux hardware. It compiles and passes clippy for
   - **Direct requests** use length byte 0x41.
   - **Battery:** feature 0x0104 function 0 gives data `[percent, _, state]`; state 1 or 2 means charging.
   - **Other features named:** 0x0108 auto-sleep, 0x0604 sidetone, 0x0636 onboard EQ, 0x020D parametric EQ.
-- **Status:** read-only (lookups and the battery read), CLI only (`devices`, `battery`, `info`, `report`). [INF] until a user's report confirms it. The app and the watcher do not use it yet.
-- **PRO X Wireless 0x1F20 NotAllowed** [HW 2026-10-16 ~15:20]: from about then, every voltage read from the CLI and from the app answered NotAllowed while Root/name still worked. [INF] The headset was off or out of range; the dongle answers for itself and refuses the ADC read.
+- **Status:**
+  - **[HW user report, v0.2.2, 15:40]** Confirmed: bridge index 3; headset features 0x0104 battery at index 4, 0x0108 auto-sleep 6, 0x0604 sidetone 7, 0x0636 onboard EQ 9.
+  - Absent features (0x0601, 0x060B, 0x020D) are not answered with index 0. The headset rejects them: `51 0A 00 03 10 00 05 00 FF 00 01 05` (sub index 0xFF, then index, function, code 0x05). lghub-lite reports these as "not present".
+  - The battery read gave `93% discharging`.
+  - Since v0.2.3 the watcher and the app read it on the 5-minute poll. A failed read reports the headset offline until it answers again. Commands other than Refresh answer "battery only".
+  - Still read-only.
+- **PRO X Wireless 0x1F20 NotAllowed = headset off** [HW 2026-10-16 ~15:20, confirmed by the owner]: every voltage read answered NotAllowed while Root/name still worked (the dongle answers for itself). Since v0.2.3 this shows as "headset off or out of range"; the watcher reports the headset offline until a reading succeeds again.
 
 ### Headset (PRO X Wireless, 0aba, HID++ 4.2 on FF43/0202)
 Features: 0x1F20 at index 6, 0x8300 at 5, 0x8310 at 4. [HW]

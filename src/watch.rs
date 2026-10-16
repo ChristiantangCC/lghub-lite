@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::audio::{self, Adc};
 use crate::battery::{self, Curve};
+use crate::centurion::{self, Centurion};
 use crate::config::{self, Preset};
 use crate::device::{self, Dpi, EVENT_FEATURES, Event};
 use crate::hid::{self, Notifier, Signal, Wake, Waker};
@@ -86,7 +87,11 @@ impl fmt::Display for Update {
                 battery,
                 ..
             } => {
-                write!(f, "+ {sel:<8} {name}  (HID++ {maj}.{min})")?;
+                if (*maj, *min) == (0, 0) {
+                    write!(f, "+ {sel:<8} {name}  (Centurion headset)")?;
+                } else {
+                    write!(f, "+ {sel:<8} {name}  (HID++ {maj}.{min})")?;
+                }
                 match battery {
                     Some(b) => write!(f, "  battery {b}"),
                     None => Ok(()),
@@ -168,6 +173,8 @@ struct Dev {
     steady: battery::Steady,
     /// What was last reported for the battery, to report only changes.
     last_battery: String,
+    /// The dongle answers but the headset is off (0x1F20 NotAllowed); reported as offline.
+    off: bool,
 }
 
 const BATTERY_POLL: Duration = Duration::from_secs(300);
@@ -199,9 +206,85 @@ impl Live {
     }
 }
 
+/// A headset on Logitech's Centurion protocol (PRO X 2 LIGHTSPEED): no HID++ interface, its
+/// battery is read on the poll timer. [INF] confirmed only through a user's report.
+struct Cent {
+    key: String,
+    pid: u16,
+    product: String,
+    c: Centurion,
+    /// Last battery read failed (headset off or out of range): reported as offline.
+    off: bool,
+    last: String,
+}
+
+impl Cent {
+    fn sel(&self) -> String {
+        format!("{:04x}", self.pid)
+    }
+
+    /// Read the battery: (text, percent).
+    fn read(&mut self) -> Result<(String, u8), Error> {
+        let b = self.c.battery()?;
+        Ok((b.to_string(), b.percent))
+    }
+
+    /// Timer read: report changes, and offline/online transitions.
+    fn poll(&mut self, out: &mut Vec<Update>) {
+        match self.read() {
+            Ok((text, pct)) => {
+                self.off = false;
+                if text != self.last {
+                    self.last = text.clone();
+                    out.push(Update::Battery {
+                        sel: self.sel(),
+                        text,
+                        percent: Some(pct),
+                    });
+                }
+            }
+            Err(e) => {
+                crate::verbose(format_args!("{}: battery read failed: {e}", self.sel()));
+                if !self.off {
+                    self.off = true;
+                    self.last.clear();
+                    out.push(Update::Offline {
+                        sel: self.sel(),
+                        reason: audio::HEADSET_OFF.into(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn snapshot(&mut self) -> Snapshot {
+        let (battery, battery_percent) = match self.read() {
+            Ok((t, p)) => (Some(t), Some(p)),
+            Err(_) => (Some(audio::HEADSET_OFF.into()), None),
+        };
+        Snapshot {
+            sel: self.sel(),
+            name: self.product.clone(),
+            battery,
+            battery_percent,
+            voltage_mv: None,
+            needs_curve: false,
+            curve_label: None,
+            recording: None,
+            tenths_left: None,
+            dpi: None,
+            rate: None,
+            mode: None,
+            model: None,
+            preset: None,
+        }
+    }
+}
+
 pub struct Monitor {
     notifier: Notifier,
     live: Vec<Live>,
+    cent: Vec<Cent>,
     swid: u8,
     trace: bool,
     presets: PathBuf,
@@ -216,6 +299,7 @@ impl Monitor {
         let mut m = Monitor {
             notifier,
             live: Vec::new(),
+            cent: Vec::new(),
             swid,
             trace,
             presets: presets.to_path_buf(),
@@ -241,6 +325,7 @@ impl Monitor {
         self.live
             .iter()
             .flat_map(|l| l.devs.iter().map(|d| l.sel(d.index)))
+            .chain(self.cent.iter().map(Cent::sel))
             .collect()
     }
 
@@ -265,7 +350,7 @@ impl Monitor {
             Woken,
             Poll,
         }
-        let polling = self.live.iter().any(|l| l.devs.iter().any(|d| d.has_voltage));
+        let polling = !self.cent.is_empty() || self.live.iter().any(|l| l.devs.iter().any(|d| d.has_voltage));
         let timeout = if polling {
             // < FOREVER, so a long wait can never be mistaken for "no timeout"
             let ms = self.next_poll.saturating_duration_since(Instant::now()).as_millis();
@@ -312,6 +397,9 @@ impl Monitor {
                 for l in self.live.iter_mut() {
                     poll_battery(l, &mut out);
                 }
+                for c in self.cent.iter_mut() {
+                    c.poll(&mut out);
+                }
             }
         }
         Ok(out)
@@ -350,6 +438,60 @@ impl Monitor {
                 ))),
             }
         }
+
+        // Centurion headsets (no HID++ interface of the same PID)
+        let found: Vec<(u16, String, hid::Info)> = centurion::interfaces()
+            .into_iter()
+            .filter(|c| !ifs.iter().any(|f| f.pid == c.0))
+            .collect();
+        let (keep, gone): (Vec<Cent>, Vec<Cent>) = std::mem::take(&mut self.cent)
+            .into_iter()
+            .partition(|c| found.iter().any(|f| f.2.iface == c.key));
+        self.cent = keep;
+        for c in gone {
+            out.push(Update::Removed {
+                pid: c.pid,
+                product: c.product.clone(),
+                reason: None,
+                sels: vec![c.sel()],
+            });
+        }
+        for (pid, product, info) in found {
+            if self.cent.iter().any(|c| c.key == info.iface) {
+                continue;
+            }
+            match Centurion::open(&info, self.trace) {
+                Ok(c) => {
+                    let mut c = Cent {
+                        key: info.iface.clone(),
+                        pid,
+                        product,
+                        c,
+                        off: false,
+                        last: String::new(),
+                    };
+                    let (battery, battery_percent) = match c.read() {
+                        Ok((t, p)) => {
+                            c.last = t.clone();
+                            (Some(t), Some(p))
+                        }
+                        Err(_) => {
+                            c.off = true;
+                            (Some(audio::HEADSET_OFF.into()), None)
+                        }
+                    };
+                    out.push(Update::Added {
+                        sel: c.sel(),
+                        name: c.product.clone(),
+                        protocol: (0, 0),
+                        battery,
+                        battery_percent,
+                    });
+                    self.cent.push(c);
+                }
+                Err(e) => out.push(Update::Line(format!("! {pid:04x}  {product}  cannot open: {e}"))),
+            }
+        }
         Ok(())
     }
 
@@ -365,6 +507,9 @@ impl Monitor {
 
     /// Read the current state of one device.
     pub fn snapshot(&mut self, sel: &str) -> Result<Snapshot, Error> {
+        if let Some(c) = self.cent.iter_mut().find(|c| c.sel() == sel) {
+            return Ok(c.snapshot());
+        }
         let (l, i) = self.find(sel)?;
         let name = l
             .devs
@@ -424,6 +569,12 @@ impl Monitor {
 
     /// Run a GUI command against one device, then return its fresh state.
     pub fn exec(&mut self, sel: &str, cmd: Cmd) -> Result<Snapshot, Error> {
+        if self.cent.iter().any(|c| c.sel() == sel) {
+            return match cmd {
+                Cmd::Refresh => self.snapshot(sel),
+                _ => Err(Error::Other("this headset supports battery reading only so far".into())),
+            };
+        }
         {
             let (l, i) = self.find(sel)?;
             match &cmd {
@@ -508,6 +659,7 @@ fn battery_now(l: &mut Live, index: u8) -> (Option<String>, Option<u8>, Option<u
                     _ => (Some("not reported right now".into()), None, None),
                 }
             }
+            Err(e) if audio::is_headset_off(&e) => (Some(audio::HEADSET_OFF.into()), None, None),
             Err(e) => (Some(format!("unreadable: {e}")), None, None),
         };
     }
@@ -603,6 +755,7 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
         curve: None,
         low_mv: u16::MAX,
         steady: battery::Steady::default(),
+        off: false,
         last_battery: String::new(),
     };
     let (battery, battery_percent) = if has_voltage {
@@ -631,6 +784,10 @@ fn attach(l: &mut Live, index: u8, out: &mut Vec<Update>) {
                 }
                 None => (Some("not reported right now".into()), None),
             },
+            Err(e) if audio::is_headset_off(&e) => {
+                dev.off = true;
+                (Some(audio::HEADSET_OFF.into()), None)
+            }
             Err(e) => (Some(format!("unreadable: {e}")), None),
         };
         dev.curve = Some(c);
@@ -742,6 +899,7 @@ fn report_voltage(l: &mut Live, index: u8, a: &Adc, out: &mut Vec<Update>) {
     let Some(mv) = d.steady.push(battery::unix_now(), a.mv) else {
         return;
     };
+    d.off = false; // a valid reading: the headset is back
     let s = Adc { mv, flags: a.flags };
     let key = battery_key(&s, d.curve.as_ref());
     if key != d.last_battery
@@ -790,6 +948,19 @@ fn poll_battery(l: &mut Live, out: &mut Vec<Update>) {
     for i in idx {
         match audio::adc(&mut l.h, i) {
             Ok(a) => report_voltage(l, i, &a, out),
+            Err(e) if audio::is_headset_off(&e) => {
+                let sel = l.sel(i);
+                if let Some(d) = l.devs.iter_mut().find(|d| d.index == i)
+                    && !d.off
+                {
+                    d.off = true;
+                    d.last_battery.clear(); // so the next good reading is reported again
+                    out.push(Update::Offline {
+                        sel,
+                        reason: audio::HEADSET_OFF.into(),
+                    });
+                }
+            }
             Err(e) => crate::verbose(format_args!("battery read failed: {e}")),
         }
     }
@@ -819,6 +990,16 @@ mod tests {
                     battery_percent: Some(54),
                 },
                 "+ c54d:1   PRO X 2  (HID++ 4.2)  battery 54% level=good discharging external=none",
+            ),
+            (
+                Update::Added {
+                    sel: "0af7".into(),
+                    name: "PRO X 2 LIGHTSPEED".into(),
+                    protocol: (0, 0),
+                    battery: Some("93% discharging".into()),
+                    battery_percent: Some(93),
+                },
+                "+ 0af7     PRO X 2 LIGHTSPEED  (Centurion headset)  battery 93% discharging",
             ),
             (
                 Update::Added {

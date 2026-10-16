@@ -334,6 +334,7 @@ impl App {
         r.battery = text;
         r.percent = percent;
         let Some(p) = percent else { return };
+        r.online = true; // a battery reading means the device answers (e.g. a headset back on)
         r.history.add(history::now(), p);
         if p > level {
             r.alerted = false;
@@ -360,7 +361,7 @@ impl App {
                     Some(r) => {
                         r.name = name;
                         r.online = true;
-                        r.protocol = Some(protocol);
+                        r.protocol = Some(protocol).filter(|p| *p != (0, 0));
                     }
                     None => {
                         let history = History::load(&self.dir, &sel);
@@ -370,7 +371,7 @@ impl App {
                             battery: None,
                             percent: None,
                             online: true,
-                            protocol: Some(protocol),
+                            protocol: Some(protocol).filter(|p| *p != (0, 0)),
                             history,
                             alerted: false,
                             demo: None,

@@ -33,6 +33,16 @@ pub fn parse_adc(p: &[u8]) -> Result<Adc, Error> {
     })
 }
 
+/// Shown when the dongle answers but the headset does not.
+pub const HEADSET_OFF: &str = "headset off or out of range";
+
+/// The dongle refuses the 0x1F20 read with NotAllowed while the headset is switched off or
+/// out of range; Root and the name still answer, from the dongle. [HW 2026-10-16: PRO X
+/// Wireless switched off, confirmed by its owner]
+pub fn is_headset_off(e: &Error) -> bool {
+    matches!(e, Error::Hpp20(5))
+}
+
 pub fn adc(h: &mut Hidpp, dev: u8) -> Result<Adc, Error> {
     let fi = h.feature(dev, 0x1F20)?;
     parse_adc(&h.call(dev, fi, 0, &[0], &[])?)
@@ -48,7 +58,10 @@ pub fn battery_text(h: &mut Hidpp, dev: u8, curve_dir: &std::path::Path) -> Resu
         Err(Error::NoFeature(_)) => {}
         Err(e) => return Err(e),
     }
-    let a = adc(h, dev)?;
+    let a = match adc(h, dev) {
+        Err(e) if is_headset_off(&e) => return Ok(HEADSET_OFF.into()),
+        r => r?,
+    };
     let model = crate::device::model_id(h, dev)?;
     Ok(voltage_text(&a, &crate::battery::find_curve(curve_dir, model)))
 }
