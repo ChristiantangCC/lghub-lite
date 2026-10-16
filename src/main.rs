@@ -554,7 +554,7 @@ fn curve(h: &mut Hidpp, dev: u8, dir: &std::path::Path, build: bool) -> Result<(
     Ok(())
 }
 
-/// `autostart [on|off]`: the per-user login entry for lghub-lite-bg.exe (status when no arg).
+/// `autostart [on|off]`: the per-user login entry for lghub-lite-bg (status when no arg).
 fn autostart_cmd(o: &Opts, set: Option<bool>) -> Result<(), Error> {
     let bg = std::env::current_exe()
         .map_err(|e| Error::Io(e.to_string()))?

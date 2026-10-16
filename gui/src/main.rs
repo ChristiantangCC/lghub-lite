@@ -13,7 +13,9 @@ mod fonts;
 mod glow;
 mod history;
 mod icons;
+mod os;
 mod skin;
+mod tray;
 mod view;
 
 use std::path::PathBuf;
@@ -29,8 +31,6 @@ use lghub_lite::hid::Waker;
 use lghub_lite::watch::{Cmd, Monitor, Snapshot, Update};
 use lghub_lite::{autostart, battery, config, hidpp, platform};
 use skin::{Settings, Skin};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 const TITLE: &str = "lghub-lite";
 /// Messages under the controls disappear after this long.
@@ -106,7 +106,7 @@ struct App {
     /// (is_error, text, when)
     message: Option<(bool, String, Instant)>,
     fatal: Option<String>,
-    tray: Option<TrayIcon>,
+    tray: Option<tray::Tray>,
     tray_tip: String,
     /// What the window and tray icons show now: (lowest, first device, second device).
     icon_state: Option<IconState>,
@@ -153,18 +153,19 @@ fn main() {
         None => match platform::instance_lock("gui") {
             Some(lock) => Some(lock),
             None => {
-                win::focus_existing(TITLE);
+                os::focus_existing(TITLE);
                 return;
             }
         },
     };
     let bg_running = demo.is_none() && platform::instance_running("bg");
 
-    let big = icons::sizes().1;
+    let big = os::icon_sizes().1;
     let (w, h, rgba) = (big, big, icons::app(big, None));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(if demo.is_some() { "lghub-lite demo" } else { TITLE })
+            .with_app_id("lghub-lite") // matches packaging/linux/lghub-lite.desktop
             .with_inner_size([view::WIDGET_W, 420.0])
             .with_resizable(false)
             .with_decorations(false)
@@ -202,7 +203,7 @@ impl App {
                 && let RawWindowHandle::Win32(w) = h.as_raw()
             {
                 hwnd = w.hwnd.get();
-                win::full_client_area(hwnd as _);
+                os::full_client_area(hwnd as _);
             }
         }
         // demo mode keeps its settings and skins away from the real ones
@@ -219,7 +220,14 @@ impl App {
             std::thread::spawn(move || worker(cfg, worker_rx, worker_tx, waker, ctx, !bg_running));
         }
         let flags = Arc::new(TrayFlags::default());
-        let tray = build_tray(&ctx, flags.clone());
+        if !demo {
+            let (flags, ctx) = (flags.clone(), ctx.clone());
+            os::serve_show_requests(Box::new(move || {
+                flags.show.store(true, Ordering::Relaxed);
+                ctx.request_repaint();
+            }));
+        }
+        let tray = tray::build(&ctx, flags.clone());
         let autostart_gui = autostart::status()
             .ok()
             .flatten()
@@ -469,7 +477,7 @@ impl App {
         if let Some(t) = &self.tray
             && tip != self.tray_tip
         {
-            let _ = t.set_tooltip(Some(&tip));
+            t.set_tooltip(&tip);
         }
         self.tray_tip = tip;
 
@@ -494,13 +502,13 @@ impl App {
         );
         if self.icon_state != Some(state) {
             self.icon_state = Some(state);
-            let (small, big) = icons::sizes();
+            let (small, big) = os::icon_sizes();
             if let Some(t) = &self.tray {
-                let _ = t.set_icon(tray_icon::Icon::from_rgba(icons::tray(small, state.1, state.2), small, small).ok());
+                t.set_levels(state.1, state.2);
             }
             // winit only updates the small icon at run time; the taskbar shows the big one
             if self.hwnd != 0 {
-                win::set_window_icons(
+                os::set_window_icons(
                     self.hwnd as _,
                     &icons::app(small, lowest),
                     small,
@@ -633,186 +641,6 @@ impl eframe::App for App {
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4] // transparent: the widget paints its own rounded frame
-    }
-}
-
-fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
-    let open = MenuItem::new("Open", true, None);
-    let skins = MenuItem::new("Skins…", true, None);
-    let quit = MenuItem::new("Quit", true, None);
-    let menu = Menu::with_items(&[&open, &skins, &quit]).ok()?;
-    let small = icons::sizes().0;
-    let icon = tray_icon::Icon::from_rgba(icons::tray(small, None, None), small, small).ok()?;
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_menu_on_left_click(false)
-        .with_tooltip(TITLE)
-        .with_icon(icon)
-        .build()
-        .ok()?;
-    let (open_id, skins_id, quit_id) = (open.id().clone(), skins.id().clone(), quit.id().clone());
-    {
-        let (ctx, flags) = (ctx.clone(), flags.clone());
-        MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
-            if e.id == open_id {
-                flags.show.store(true, Ordering::Relaxed);
-            } else if e.id == skins_id {
-                flags.skins.store(true, Ordering::Relaxed);
-            } else if e.id == quit_id {
-                flags.quit.store(true, Ordering::Relaxed);
-            }
-            ctx.request_repaint();
-        }));
-    }
-    let ctx = ctx.clone();
-    TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-        let left_click = matches!(
-            e,
-            TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } | TrayIconEvent::DoubleClick { .. }
-        );
-        if left_click {
-            flags.show.store(true, Ordering::Relaxed);
-            ctx.request_repaint();
-        }
-    }));
-    Some(tray)
-}
-
-/// Small Win32 helpers: bringing an existing window forward, file dialogs, window icons.
-mod win {
-    use std::path::PathBuf;
-
-    use windows_sys::Win32::UI::Controls::Dialogs::{
-        GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OPENFILENAMEW,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_SHOW, SetForegroundWindow, ShowWindow};
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(Some(0)).collect()
-    }
-
-    pub fn focus_existing(title: &str) {
-        let t = wide(title);
-        // SAFETY: NUL-terminated title; the window belongs to our other instance.
-        unsafe {
-            let w = FindWindowW(std::ptr::null(), t.as_ptr());
-            if !w.is_null() {
-                ShowWindow(w, SW_SHOW);
-                SetForegroundWindow(w);
-            }
-        }
-    }
-
-    /// winit gives borderless windows a 1 px top strip for the system drop shadow, which
-    /// shifts the content down by a pixel and draws a dark line. Take the whole window as
-    /// client area instead (the widget paints its own edge).
-    /// Set the window's small (title/alt-tab) and big (taskbar) icons from RGBA images.
-    pub fn set_window_icons(hwnd: windows_sys::Win32::Foundation::HWND, small: &[u8], ss: u32, big: &[u8], bs: u32) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CreateIcon, DestroyIcon, HICON, ICON_BIG, ICON_SMALL, SendMessageW, WM_SETICON,
-        };
-        fn make(rgba: &[u8], size: u32) -> HICON {
-            // 32-bit colour bits are BGRA; the AND mask is all zero (the alpha channel rules)
-            let bgra: Vec<u8> = rgba
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|p| [p[2], p[1], p[0], p[3]])
-                .collect();
-            let mask_row = (size as usize).div_ceil(16) * 2;
-            let mask = vec![0u8; mask_row * size as usize];
-            // SAFETY: buffers match the stated size and bit depth; null instance is allowed.
-            unsafe {
-                CreateIcon(
-                    std::ptr::null_mut(),
-                    size as i32,
-                    size as i32,
-                    1,
-                    32,
-                    mask.as_ptr(),
-                    bgra.as_ptr(),
-                )
-            }
-        }
-        for (kind, rgba, size) in [(ICON_SMALL, small, ss), (ICON_BIG, big, bs)] {
-            let icon = make(rgba, size);
-            if icon.is_null() {
-                continue;
-            }
-            // SAFETY: our own window; WM_SETICON returns the previous icon, which we created.
-            unsafe {
-                let old = SendMessageW(hwnd, WM_SETICON, kind as usize, icon as isize);
-                if old != 0 {
-                    DestroyIcon(old as HICON);
-                }
-            }
-        }
-    }
-
-    pub fn full_client_area(hwnd: windows_sys::Win32::Foundation::HWND) {
-        use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-        use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WM_NCCALCSIZE,
-        };
-
-        unsafe extern "system" fn proc(h: HWND, msg: u32, w: WPARAM, l: LPARAM, _: usize, _: usize) -> LRESULT {
-            if msg == WM_NCCALCSIZE && w != 0 {
-                return 0; // client rect = window rect
-            }
-            // SAFETY: forwarding the message unchanged to the next handler.
-            unsafe { DefSubclassProc(h, msg, w, l) }
-        }
-        // SAFETY: hwnd is our live top-level window; the subclass lives as long as it does.
-        unsafe {
-            SetWindowSubclass(hwnd, Some(proc), 1, 0);
-            SetWindowPos(
-                hwnd,
-                std::ptr::null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-            );
-        }
-    }
-
-    /// The standard Windows open/save dialog for skin files. `save` proposes `name`.
-    pub fn skin_file_dialog(save: bool, name: &str) -> Option<PathBuf> {
-        let filter: Vec<u16> = "Skin files (*.json)\0*.json\0All files\0*.*\0\0"
-            .encode_utf16()
-            .collect();
-        let mut buf = [0u16; 1024];
-        for (i, c) in name.encode_utf16().take(buf.len() - 1).enumerate() {
-            buf[i] = c;
-        }
-        let ext = wide("json");
-        // SAFETY: zeroed is a valid OPENFILENAMEW; the pointers below outlive the call.
-        let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
-        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.lpstrFilter = filter.as_ptr();
-        ofn.lpstrFile = buf.as_mut_ptr();
-        ofn.nMaxFile = buf.len() as u32;
-        ofn.lpstrDefExt = ext.as_ptr();
-        ofn.Flags = OFN_NOCHANGEDIR | if save { OFN_OVERWRITEPROMPT } else { OFN_FILEMUSTEXIST };
-        // SAFETY: ofn is fully initialised for the call.
-        let ok = unsafe {
-            if save {
-                GetSaveFileNameW(&mut ofn)
-            } else {
-                GetOpenFileNameW(&mut ofn)
-            }
-        };
-        if ok == 0 {
-            return None;
-        }
-        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
     }
 }
 

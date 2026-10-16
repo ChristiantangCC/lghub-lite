@@ -14,7 +14,7 @@ use lghub_lite::watch::Cmd;
 use crate::fonts::{GROTESK, MONO, MONO_SEMIBOLD, PIXEL, SANS, SANS_MEDIUM, SANS_SEMIBOLD, font};
 use crate::history::{self, BARS};
 use crate::skin::{self, BAD, Digits, FACE, FIELDS, FRAME, HI, INK, LCD, LCD_DIM, LCD_INK, LO, OK, Skin};
-use crate::{App, win};
+use crate::{App, os};
 
 pub const WIDGET_W: f32 = 420.0;
 const MANAGER_W: f32 = 420.0;
@@ -1195,7 +1195,7 @@ impl App {
             Color32::WHITE,
         );
         if resp.clicked()
-            && let Some(path) = win::skin_file_dialog(false, "")
+            && let Some(path) = os::skin_file_dialog(false, "")
         {
             self.import_skin(&path);
         }
@@ -1220,7 +1220,7 @@ impl App {
                 out.author = "you".into();
             }
             let name = format!("{}.skin.json", skin::slug(&out.name));
-            if let Some(path) = win::skin_file_dialog(true, &name) {
+            if let Some(path) = os::skin_file_dialog(true, &name) {
                 self.skin_msg = Some(match lghub_lite::config::write_atomic(&path, &out.to_json()) {
                     Ok(()) => (
                         true,

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=lghub-lite
+GenericName=Mouse and headset battery
+Comment=Battery, DPI and report rate for Logitech HID++ mice and headsets (not affiliated with Logitech)
+Exec=lghub-lite-gui
+Icon=lghub-lite
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+Keywords=Logitech;mouse;headset;battery;DPI;
+StartupWMClass=lghub-lite

@@ -18,8 +18,15 @@ path = "src/main.rs"
 [dependencies]
 lghub-lite = { path = ".." }
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
-tray-icon = "0.26"
 raw-window-handle = "0.6" # already part of eframe; gives the HWND for the borderless fix
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# X11 and Wayland window support, and a StatusNotifierItem tray over D-Bus (no GTK)
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_UI_Controls_Dialogs",    # open/save dialogs for skin files

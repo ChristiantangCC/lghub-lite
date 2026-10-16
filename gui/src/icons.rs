@@ -159,19 +159,6 @@ pub fn tray(size: u32, top: Option<Level>, bottom: Option<Level>) -> Vec<u8> {
     scale(&tray16(top, bottom), 16, size as usize)
 }
 
-/// Icon sizes Windows uses at the system DPI: (tray / small, window / taskbar).
-pub fn sizes() -> (u32, u32) {
-    use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SM_CXICON, SM_CXSMICON};
-    // SAFETY: plain queries without pointers.
-    unsafe {
-        let dpi = GetDpiForSystem();
-        let small = GetSystemMetricsForDpi(SM_CXSMICON, dpi).max(16) as u32;
-        let big = GetSystemMetricsForDpi(SM_CXICON, dpi).max(32) as u32;
-        (small, big)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,11 +172,16 @@ mod tests {
         };
         let ok = |pct| Some(Level { pct, low: false });
         let low = |pct| Some(Level { pct, low: true });
-        let cases: [(&str, Vec<u8>); 4] = [
+        let cases: [(&str, Vec<u8>); 8] = [
             ("app-3c-32", app(32, ok(75))),
             ("tray-4b-ok-ok-16", tray(16, ok(50), ok(64))),
             ("tray-4b-low-ok-32", tray(32, low(14), ok(64))),
             ("tray-4b-off-ok-48", tray(48, None, ok(64))),
+            // static app icons for the Linux .desktop entry (a full battery)
+            ("app-32", app(32, ok(100))),
+            ("app-64", app(64, ok(100))),
+            ("app-128", app(128, ok(100))),
+            ("app-256", app(256, ok(100))),
         ];
         for (name, px) in cases {
             std::fs::write(format!("{dir}/{name}.rgba"), px).unwrap();
