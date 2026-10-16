@@ -29,9 +29,9 @@ jobs:
         working-directory: gui
       - run: cargo build --release
         working-directory: gui
-      - name: Binary sizes
+      - name: Release package (the Release workflow's script, so packaging breaks show here)
         shell: pwsh
-        run: Get-ChildItem target\release\lghub-lite*.exe, gui\target\release\lghub-lite-gui.exe | Format-Table Name, Length
+        run: ./packaging/package-windows.ps1 -Version ci
 
   linux:
     # Experimental platform: built, linted and unit-tested here; no Linux hardware tests.
@@ -59,8 +59,8 @@ jobs:
           code=$?
           # still running after 15 s (killed by timeout, 124) = started and kept rendering
           echo "exit code $code"; [ "$code" -eq 124 ]
-      - name: Binary sizes
-        run: ls -l target/release/lghub-lite target/release/lghub-lite-bg gui/target/release/lghub-lite-gui
+      - name: Release package (the Release workflow's script, so packaging breaks show here)
+        run: sh packaging/package-linux.sh ci
 
   msrv:
     # The core's rust-version (CLI + background watcher) must really build.
