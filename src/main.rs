@@ -31,6 +31,9 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   mode <dev> [host|onboard] read or set onboard-profile mode (host mode allows DPI/rate writes)
   raw <dev> <hex...>       send one raw report, print replies (needs --allow-raw)
   collections              list every Logitech HID collection (debug)
+  report                   everything needed to diagnose a device that does not work, in one
+                           go (collections, devices, info and battery of each, with traces of
+                           any step that fails); send the output with a device report
 
 <dev> is PID[:INDEX] as printed by `devices`, e.g. c54d:1 (receiver slot 1) or 0aba.
 Presets live in presets.txt in the settings folder (Windows: %APPDATA%\\lghub-lite,
@@ -111,6 +114,7 @@ fn main() {
             with_dev(&opts, d, |h, dev| apply(h, dev, &path))
         }
         ["collections"] => collections(),
+        ["report"] => report(&opts),
         ["info", d] => with_dev(&opts, d, info),
         ["battery", d] => {
             let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
@@ -253,6 +257,82 @@ fn collections() -> Result<(), Error> {
     Ok(())
 }
 
+/// `report`: one diagnostic dump for device reports. Every step runs even if earlier ones
+/// fail; a failing step is repeated with --trace so the HID++ exchange is in the report.
+/// Contains device names, IDs and HID layout only (no personal data).
+fn report(o: &Opts) -> Result<(), Error> {
+    lghub_lite::set_verbose(true);
+    println!("=== lghub-lite report ===");
+    println!("version    {}", env!("CARGO_PKG_VERSION"));
+    println!("system     {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    println!("time       {}", watch::now());
+    let section = |t: &str| println!("\n--- {t} ---");
+
+    section("HID collections (every Logitech one, as the OS reports them)");
+    if let Err(e) = collections() {
+        println!("error: {e}");
+    }
+    section("HID++ devices");
+    if let Err(e) = devices(o) {
+        println!("error: {e}");
+    }
+
+    let dir = o.curve_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let ifs = device::interfaces().unwrap_or_default();
+    for f in &ifs {
+        let mut h = match Hidpp::open(&f.cols, o.swid, false) {
+            Ok(h) => h,
+            Err(e) => {
+                section(&format!("{:04x} {}", f.pid, f.product));
+                println!("error: cannot open: {e}");
+                continue;
+            }
+        };
+        let mut targets = Vec::new();
+        match h.ping(DIRECT, 0x5A) {
+            Ok(_) => targets.push((DIRECT, format!("{:04x}", f.pid))),
+            Err(Error::Hpp10(_)) => {
+                // a receiver: every paired device that answers
+                h.timeout = Duration::from_millis(600);
+                for slot in 0..6u8 {
+                    if device::pairing(&mut h, slot).is_ok() && h.ping(slot + 1, 0x5A).is_ok() {
+                        targets.push((slot + 1, format!("{:04x}:{}", f.pid, slot + 1)));
+                    }
+                }
+                h.timeout = Duration::from_millis(2000);
+            }
+            Err(e) => {
+                section(&format!("{:04x} {}", f.pid, f.product));
+                println!("error: no HID++ 2.0 answer: {e}");
+                h.trace = true;
+                let _ = h.ping(DIRECT, 0x5A);
+                h.trace = false;
+            }
+        }
+        for (dev, sel) in targets {
+            type Step<'a> = (&'a str, Box<dyn Fn(&mut Hidpp, u8) -> Result<(), Error> + 'a>);
+            let steps: [Step; 2] = [
+                ("info", Box::new(info)),
+                ("battery", Box::new(|h: &mut Hidpp, d: u8| battery(h, d, &dir))),
+            ];
+            for (what, step) in steps {
+                section(&format!("{what} {sel}"));
+                if let Err(e) = step(&mut h, dev) {
+                    println!("error: {e}");
+                    println!("(repeating with --trace)");
+                    h.trace = true;
+                    if let Err(e) = step(&mut h, dev) {
+                        println!("error: {e}");
+                    }
+                    h.trace = false;
+                }
+            }
+        }
+    }
+    section("end of report");
+    Ok(())
+}
+
 fn devices(o: &Opts) -> Result<(), Error> {
     let ifs = device::interfaces()?;
     if ifs.is_empty() {
@@ -272,7 +352,7 @@ fn devices(o: &Opts) -> Result<(), Error> {
                 println!("{:04x}      {name}  (HID++ {maj}.{min}, direct)", f.pid);
             }
             Err(Error::Hpp10(_)) => {
-                // HID++ 1.0 answer to a 2.0 ping: this is a receiver. [OBS Â§9.6]
+                // HID++ 1.0 answer to a 2.0 ping: this is a receiver. [OBS §9.6]
                 let n = device::connected_count(&mut h)
                     .map(|n| n.to_string())
                     .unwrap_or_else(|e| format!("? ({e})"));

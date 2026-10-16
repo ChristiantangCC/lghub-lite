@@ -39,8 +39,10 @@ folder**; the rest builds and works the same, with a single dependency.
 | PRO X SUPERLIGHT 2 | LIGHTSPEED receiver, USB cable | list, info, battery, DPI read/write, report rate read/write, onboard mode, presets, connect/disconnect events, onboard memory read/backup |
 | PRO X Wireless headset | its USB dongle | list, info, battery percentage from the voltage (estimated until a discharge is measured, see below), equalizer (read-only) |
 
-Have a different device? Run `lghub-lite devices` and `lghub-lite info <dev>` and open a
-[device report](../../issues/new?template=device-report.md). That is how the table grows.
+Have a different device, or one that does not work? On Windows, double-click **`diagnose.cmd`**
+in the lghub-lite folder (on Linux: `./lghub-lite report > report.txt`). It collects everything
+needed in one file, including a trace of any step that fails, and opens it. Send that file with
+a [device report](../../issues/new?template=device-report.md). That is how the table grows.
 
 ## Install
 
@@ -212,6 +214,7 @@ A measured `curve-<model>.txt` is your own data, so you can share it: attach it 
 | `eq <dev>` | Show a headset's hardware equalizer (read-only) |
 | `profiles <dev>` | Onboard profile memory overview (read-only) |
 | `dump <dev> <file>` | Back up all onboard memory to a text file (read-only) |
+| `report` | Everything needed to diagnose a device, in one go (what `diagnose.cmd` runs) |
 | `collections` | List every Logitech HID collection (debugging) |
 | `raw <dev> <hex…> --allow-raw` | Send one raw HID++ report (debugging, use with care) |
 

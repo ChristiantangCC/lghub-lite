@@ -28,6 +28,9 @@ same and this step can be skipped.
 `<dev>` is what `devices` prints. If you get "permission denied", step 1 has not taken effect
 yet (replug the device, or log out and in).
 
+If something does not work, run `./lghub-lite report > report.txt` and attach `report.txt`
+to a device report: it holds everything needed to find the problem.
+
 ## 3. Install (optional)
 
 ```sh
