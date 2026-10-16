@@ -1,0 +1,6 @@
+# lghub-lite: let the logged-in user talk to Logitech HID devices (hidraw), without root.
+# Install:
+#   sudo cp 70-lghub-lite.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# then unplug and replug the receiver / headset. Solaar ships a similar rule; either is enough.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", TAG+="uaccess"

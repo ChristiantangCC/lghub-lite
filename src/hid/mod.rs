@@ -4,6 +4,11 @@
 
 use std::io;
 
+pub mod descriptor;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{Handle, Notifier, RawWaitable, Waker, enumerate, wait_any};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -43,17 +48,28 @@ pub enum Wake {
 /// a Win32 event handle on Windows, a pollable file descriptor on Linux.
 pub trait Signal {
     fn raw(&self) -> RawWaitable;
+    /// Reset after a wake-up. Windows events reset themselves; a Linux eventfd or socket stays
+    /// readable until read.
+    fn consume(&self) {}
 }
 
 impl Signal for Waker {
     fn raw(&self) -> RawWaitable {
         self.raw_waitable()
     }
+    #[cfg(target_os = "linux")]
+    fn consume(&self) {
+        Waker::consume(self)
+    }
 }
 
 impl Signal for Notifier {
     fn raw(&self) -> RawWaitable {
         self.raw_waitable()
+    }
+    #[cfg(target_os = "linux")]
+    fn consume(&self) {
+        Notifier::consume(self)
     }
 }
 
