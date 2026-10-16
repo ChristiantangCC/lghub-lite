@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "lghub-lite"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "lghub-lite-gui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "eframe",
  "ksni",

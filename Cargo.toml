@@ -3,7 +3,7 @@
 
 [package]
 name = "lghub-lite"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Tiny CLI for Logitech HID++ mice and headsets: DPI, report rate, battery, presets. Not affiliated with or endorsed by Logitech."

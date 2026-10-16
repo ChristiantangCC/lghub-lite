@@ -231,6 +231,22 @@ All [INF]: written without Linux hardware. It compiles and passes clippy for
 - **Paths:** `$XDG_CONFIG_HOME/lghub-lite` (or `~/.config/lghub-lite`). Instance locks are flock files in `$XDG_RUNTIME_DIR`. Autostart uses `~/.config/autostart/lghub-lite.desktop`.
 - **App:** eframe x11 + wayland. The tray is ksni (StatusNotifierItem over D-Bus, async-io runtime, no GTK); without an SNI host the app runs without a tray. A second launch sends "show" over a Unix socket. Skin file dialogs use zenity or kdialog if installed. App id `lghub-lite` matches the desktop entry.
 
+### Centurion headsets (PRO X 2 LIGHTSPEED, 0af7), 2026-10-16
+- **[HW user report]** The PRO X 2 LIGHTSPEED headset's dongle (046d:0af7, "PRO X 2 LIGHTSPEED") exposes no HID++ collection. On interface 3 it has:
+  - 000C/1 (2 B in), consumer keys;
+  - FF13/1 (62/62 B);
+  - FFA0/1 (64/64 B).
+  So lghub-lite listed nothing for it. The same report: PRO X SUPERLIGHT (wpid 4093) on receiver c547 works (HID++ 4.2; features 1004 v3, 2201 v2, 8060 v0, 8100), and its firmware names itself "PRO X Wireless".
+- **[PUB HeadsetControl, GPL-3.0; facts only, no code]** These headsets speak "Centurion" on FFA0/1. The implementation is `src/centurion.rs`:
+  - **Frames:** 64-byte frames with report ID 0x51: `[0x51, len, flags, payload]`.
+  - **Features:** HID++-style Root (index 0, GetFeature = function 0 with the feature ID) and FeatureSet. Software ID 1.
+  - **Bridge:** the headset sits behind a dongle feature 0x0003. Bridged payload: `[bridge, 0x11, size hi, size lo, 0, sub index, function|swid, params]`, length = payload + 1. The dongle ACKs first (swid nibble 1); the answer follows as an event: byte 7 status, byte 8 sub index (0xFF = rejected), data from byte 10.
+  - **Direct requests** use length byte 0x41.
+  - **Battery:** feature 0x0104 function 0 gives data `[percent, _, state]`; state 1 or 2 means charging.
+  - **Other features named:** 0x0108 auto-sleep, 0x0604 sidetone, 0x0636 onboard EQ, 0x020D parametric EQ.
+- **Status:** read-only (lookups and the battery read), CLI only (`devices`, `battery`, `info`, `report`). [INF] until a user's report confirms it. The app and the watcher do not use it yet.
+- **PRO X Wireless 0x1F20 NotAllowed** [HW 2026-10-16 ~15:20]: from about then, every voltage read from the CLI and from the app answered NotAllowed while Root/name still worked. [INF] The headset was off or out of range; the dongle answers for itself and refuses the ADC read.
+
 ### Headset (PRO X Wireless, 0aba, HID++ 4.2 on FF43/0202)
 Features: 0x1F20 at index 6, 0x8300 at 5, 0x8310 at 4. [HW]
 

@@ -1,6 +1,6 @@
 [package]
 name = "lghub-lite-gui"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.95" # eframe 0.37
 description = "Window + tray front end for lghub-lite. Not affiliated with or endorsed by Logitech."

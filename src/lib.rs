@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod autostart;
 pub mod battery;
+pub mod centurion;
 pub mod config;
 pub mod device;
 pub mod hid;

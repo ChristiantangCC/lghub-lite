@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use lghub_lite::device::parse_selector;
 use lghub_lite::hidpp::{self, DIRECT, Error, Hidpp};
-use lghub_lite::{LOGITECH_VID, audio, autostart, battery, config, device, hid, platform, profiles, verbose, watch};
+use lghub_lite::{
+    LOGITECH_VID, audio, autostart, battery, centurion, config, device, hid, platform, profiles, verbose, watch,
+};
 
 const USAGE: &str = "\
 lghub-lite: control Logitech HID++ mice and headsets without G HUB.
@@ -115,11 +117,19 @@ fn main() {
         }
         ["collections"] => collections(),
         ["report"] => report(&opts),
-        ["info", d] => with_dev(&opts, d, info),
-        ["battery", d] => {
-            let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
-            with_dev(&opts, d, |h, dev| battery(h, dev, &dir))
-        }
+        ["info", d] => match centurion_for(d) {
+            Some(c) => centurion_probe(&c, opts.trace, false),
+            None => with_dev(&opts, d, info),
+        },
+        ["battery", d] => match centurion_for(d) {
+            Some(c) => centurion::Centurion::open(&c, opts.trace)
+                .and_then(|mut h| h.battery())
+                .map(|b| println!("{b}")),
+            None => {
+                let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
+                with_dev(&opts, d, |h, dev| battery(h, dev, &dir))
+            }
+        },
         ["curve", d, rest @ ..] if rest.len() <= 1 && rest.iter().all(|r| *r == "build") => {
             let dir = opts.curve_dir().unwrap_or_else(|e| die(&e.to_string()));
             with_dev(&opts, d, |h, dev| curve(h, dev, &dir, !rest.is_empty()))
@@ -329,14 +339,71 @@ fn report(o: &Opts) -> Result<(), Error> {
             }
         }
     }
+    for (pid, product, info) in centurion::interfaces() {
+        if ifs.iter().any(|f| f.pid == pid) {
+            continue;
+        }
+        section(&format!("centurion {pid:04x} {product}"));
+        if let Err(e) = centurion_probe(&info, false, true) {
+            println!("error: {e}");
+        }
+    }
     section("end of report");
+    Ok(())
+}
+
+/// The Centurion collection for selector `sel` (a bare PID with no HID++ interface).
+fn centurion_for(sel: &str) -> Option<hid::Info> {
+    let (pid, dev) = parse_selector(sel)?;
+    if dev != DIRECT || device::interfaces().is_ok_and(|ifs| ifs.iter().any(|f| f.pid == pid)) {
+        return None;
+    }
+    centurion::interfaces().into_iter().find(|c| c.0 == pid).map(|c| c.2)
+}
+
+/// Bridge, the known headset features and the battery of a Centurion headset, each step
+/// separately so one failure does not hide the rest. `retrace`: repeat failing steps traced.
+fn centurion_probe(info: &hid::Info, trace: bool, retrace: bool) -> Result<(), Error> {
+    let mut c = centurion::Centurion::open(info, trace)?;
+    let step =
+        |c: &mut centurion::Centurion, what: &str, f: &dyn Fn(&mut centurion::Centurion) -> Result<String, Error>| {
+            match f(c) {
+                Ok(v) => println!("{what:<20} {v}"),
+                Err(e) => {
+                    println!("{what:<20} error: {e}");
+                    if retrace && !c.trace {
+                        println!("(repeating with --trace)");
+                        c.trace = true;
+                        if let Err(e) = f(c) {
+                            println!("{what:<20} error: {e}");
+                        }
+                        c.trace = false;
+                    }
+                }
+            }
+        };
+    println!("protocol             Centurion (experimental, read-only)");
+    step(&mut c, "bridge index", &|c| c.bridge().map(|i| i.to_string()));
+    for (id, name) in centurion::KNOWN {
+        step(&mut c, &format!("feature {id:04X} {name}"), &|c| {
+            c.feature(id).map(|i| format!("index {i}"))
+        });
+    }
+    step(&mut c, "battery", &|c| c.battery().map(|b| b.to_string()));
     Ok(())
 }
 
 fn devices(o: &Opts) -> Result<(), Error> {
     let ifs = device::interfaces()?;
-    if ifs.is_empty() {
+    let cent: Vec<_> = centurion::interfaces()
+        .into_iter()
+        .filter(|c| !ifs.iter().any(|f| f.pid == c.0))
+        .collect();
+    if ifs.is_empty() && cent.is_empty() {
         println!("no Logitech HID++ interfaces found");
+    }
+    for (pid, product, _) in &cent {
+        println!("{pid:04x}      {product}  (Centurion headset, experimental: battery only)");
     }
     for f in &ifs {
         let mut h = match Hidpp::open(&f.cols, o.swid, o.trace) {
