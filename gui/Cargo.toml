@@ -22,6 +22,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Security",
     "Win32_System_Threading",       # single-instance mutex
     "Win32_UI_Controls_Dialogs",    # open/save dialogs for skin files
+    "Win32_UI_HiDpi",               # icon sizes for the system DPI
     "Win32_UI_Shell",               # window subclass: borderless window without the 1 px top line
     "Win32_UI_WindowsAndMessaging", # show/hide the window from the tray
 ] }

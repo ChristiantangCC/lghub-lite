@@ -61,8 +61,13 @@ Double-click **`lghub-lite-gui.exe`**. It opens a small battery widget:
   files. You can also drop a skin file on the window. Custom skins live in
   `%APPDATA%\lghub-lite\skins\`.
 
-The round buttons in the title bar minimise the widget or hide it to the **tray** (the tooltip
-shows battery levels); drag the title bar to move it. Use the tray menu's **Quit** to exit.
+The round buttons in the title bar minimise the widget or hide it to the **tray**; drag the
+title bar to move it. Use the tray menu's **Quit** to exit.
+
+The icons are live too. The **taskbar** battery shows the device with the lowest charge: one
+lit cell per started 25 %, red at or under that device's alert level. The **tray** icon has one
+bar per device (the first two in the list), filled to its charge: green, red when low, and a
+grey checkerboard while a device is offline. Its tooltip lists every device's level.
 
 The app is about 4.9 MB (including its fonts) and uses roughly 150 MB of memory, mostly the graphics driver (it
 draws with OpenGL). It uses no CPU while idle. If you want the smallest footprint, use the

@@ -12,13 +12,14 @@ mod demo;
 mod fonts;
 mod glow;
 mod history;
+mod icons;
 mod skin;
 mod view;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -45,6 +46,8 @@ enum FromWorker {
     Snapshot(String, Result<Snapshot, String>),
     Fatal(String),
 }
+
+type IconState = (Option<icons::Level>, Option<icons::Level>, Option<icons::Level>);
 
 struct Row {
     sel: String,
@@ -105,7 +108,10 @@ struct App {
     fatal: Option<String>,
     tray: Option<TrayIcon>,
     tray_tip: String,
-    tray_low: bool,
+    /// What the window and tray icons show now: (lowest, first device, second device).
+    icon_state: Option<IconState>,
+    /// Our window, for setting its icons directly (0 if unknown).
+    hwnd: isize,
     flags: Arc<TrayFlags>,
     quitting: bool,
     autostart_gui: bool,
@@ -147,7 +153,8 @@ fn main() {
     }
     let bg_running = demo.is_none() && win::mutex_exists("Local\\lghub-lite-bg");
 
-    let (w, h, rgba) = icon_rgba(false);
+    let big = icons::sizes().1;
+    let (w, h, rgba) = (big, big, icons::app(big, None));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(if demo.is_some() { "lghub-lite demo" } else { TITLE })
@@ -181,12 +188,14 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>, cfg: PathBuf, bg_running: bool, demo: bool) -> App {
         let ctx = cc.egui_ctx.clone();
         fonts::install(&ctx);
+        let mut hwnd = 0isize;
         {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             if let Ok(h) = cc.window_handle()
                 && let RawWindowHandle::Win32(w) = h.as_raw()
             {
-                win::full_client_area(w.hwnd.get() as _);
+                hwnd = w.hwnd.get();
+                win::full_client_area(hwnd as _);
             }
         }
         // demo mode keeps its settings and skins away from the real ones
@@ -224,7 +233,8 @@ impl App {
             fatal: None,
             tray,
             tray_tip: String::new(),
-            tray_low: false,
+            icon_state: None,
+            hwnd,
             flags,
             quitting: false,
             autostart_gui,
@@ -434,7 +444,7 @@ impl App {
         }
     }
 
-    fn update_tray(&mut self) {
+    fn update_tray(&mut self, ctx: &egui::Context) {
         let parts: Vec<String> = self
             .rows
             .iter()
@@ -449,18 +459,55 @@ impl App {
         } else {
             format!("{TITLE}\n{}", parts.join("\n"))
         };
-        let low = self.rows.iter().any(|r| r.online && r.alerted);
-        if let Some(t) = &self.tray {
-            if tip != self.tray_tip {
-                let _ = t.set_tooltip(Some(&tip));
-            }
-            if low != self.tray_low {
-                let (w, h, rgba) = icon_rgba(low);
-                let _ = t.set_icon(tray_icon::Icon::from_rgba(rgba, w, h).ok());
-            }
+        if let Some(t) = &self.tray
+            && tip != self.tray_tip
+        {
+            let _ = t.set_tooltip(Some(&tip));
         }
         self.tray_tip = tip;
-        self.tray_low = low;
+
+        // Icons: the window/taskbar battery shows the lowest device, the tray one bar each
+        // for the first two devices (in the order of the list).
+        let levels: Vec<Option<icons::Level>> = self
+            .rows
+            .iter()
+            .map(|r| {
+                let pct = r.percent.filter(|_| r.online)?;
+                Some(icons::Level {
+                    pct,
+                    low: pct <= self.alert_level(&r.sel),
+                })
+            })
+            .collect();
+        let lowest = levels.iter().flatten().min_by_key(|l| l.pct).copied();
+        let state = (
+            lowest,
+            levels.first().copied().flatten(),
+            levels.get(1).copied().flatten(),
+        );
+        if self.icon_state != Some(state) {
+            self.icon_state = Some(state);
+            let (small, big) = icons::sizes();
+            if let Some(t) = &self.tray {
+                let _ = t.set_icon(tray_icon::Icon::from_rgba(icons::tray(small, state.1, state.2), small, small).ok());
+            }
+            // winit only updates the small icon at run time; the taskbar shows the big one
+            if self.hwnd != 0 {
+                win::set_window_icons(
+                    self.hwnd as _,
+                    &icons::app(small, lowest),
+                    small,
+                    &icons::app(big, lowest),
+                    big,
+                );
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(egui::IconData {
+                    rgba: icons::app(big, lowest),
+                    width: big,
+                    height: big,
+                }))));
+            }
+        }
     }
 
     fn set_autostart(&mut self, on: bool) {
@@ -537,7 +584,7 @@ impl eframe::App for App {
                 FromWorker::Fatal(e) => self.fatal = Some(e),
             }
         }
-        self.update_tray();
+        self.update_tray(ctx);
         if self.message.as_ref().is_some_and(|m| m.2.elapsed() > MESSAGE_TIME) {
             self.message = None;
         }
@@ -587,8 +634,8 @@ fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
     let skins = MenuItem::new("Skins…", true, None);
     let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::with_items(&[&open, &skins, &quit]).ok()?;
-    let (w, h, rgba) = icon_rgba(false);
-    let icon = tray_icon::Icon::from_rgba(rgba, w, h).ok()?;
+    let small = icons::sizes().0;
+    let icon = tray_icon::Icon::from_rgba(icons::tray(small, None, None), small, small).ok()?;
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -626,35 +673,6 @@ fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
         }
     }));
     Some(tray)
-}
-
-/// 32×32 RGBA app/tray icon drawn in code (a mouse outline), so no image assets are needed.
-/// `low` draws it red, for a device under its alert level.
-fn icon_rgba(low: bool) -> (u32, u32, Vec<u8>) {
-    static ICONS: Mutex<[Option<Vec<u8>>; 2]> = Mutex::new([None, None]);
-    let mut cache = ICONS.lock().unwrap_or_else(|e| e.into_inner());
-    let px = cache[low as usize].get_or_insert_with(|| {
-        let body: [u8; 4] = if low { [235, 64, 52, 255] } else { [38, 132, 255, 255] };
-        let mut px = vec![0u8; 32 * 32 * 4];
-        for y in 0..32 {
-            for x in 0..32 {
-                let (dx, dy) = ((x as f32 - 15.5) / 10.5, (y as f32 - 16.0) / 14.5);
-                let d = dx * dx + dy * dy;
-                let i = (y * 32 + x) * 4;
-                let line = (x == 15 || x == 16) && y < 15 || y == 14 && (6..26).contains(&x);
-                let color: [u8; 4] = if d > 1.0 {
-                    [0, 0, 0, 0]
-                } else if line && d < 0.92 {
-                    [255, 255, 255, 255]
-                } else {
-                    body
-                };
-                px[i..i + 4].copy_from_slice(&color);
-            }
-        }
-        px
-    });
-    (32, 32, px.clone())
 }
 
 /// Small Win32 helpers: single instance, bringing an existing window forward, file dialogs.
@@ -708,6 +726,49 @@ mod win {
     /// winit gives borderless windows a 1 px top strip for the system drop shadow, which
     /// shifts the content down by a pixel and draws a dark line. Take the whole window as
     /// client area instead (the widget paints its own edge).
+    /// Set the window's small (title/alt-tab) and big (taskbar) icons from RGBA images.
+    pub fn set_window_icons(hwnd: windows_sys::Win32::Foundation::HWND, small: &[u8], ss: u32, big: &[u8], bs: u32) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateIcon, DestroyIcon, HICON, ICON_BIG, ICON_SMALL, SendMessageW, WM_SETICON,
+        };
+        fn make(rgba: &[u8], size: u32) -> HICON {
+            // 32-bit colour bits are BGRA; the AND mask is all zero (the alpha channel rules)
+            let bgra: Vec<u8> = rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[2], p[1], p[0], p[3]])
+                .collect();
+            let mask_row = (size as usize).div_ceil(16) * 2;
+            let mask = vec![0u8; mask_row * size as usize];
+            // SAFETY: buffers match the stated size and bit depth; null instance is allowed.
+            unsafe {
+                CreateIcon(
+                    std::ptr::null_mut(),
+                    size as i32,
+                    size as i32,
+                    1,
+                    32,
+                    mask.as_ptr(),
+                    bgra.as_ptr(),
+                )
+            }
+        }
+        for (kind, rgba, size) in [(ICON_SMALL, small, ss), (ICON_BIG, big, bs)] {
+            let icon = make(rgba, size);
+            if icon.is_null() {
+                continue;
+            }
+            // SAFETY: our own window; WM_SETICON returns the previous icon, which we created.
+            unsafe {
+                let old = SendMessageW(hwnd, WM_SETICON, kind as usize, icon as isize);
+                if old != 0 {
+                    DestroyIcon(old as HICON);
+                }
+            }
+        }
+    }
+
     pub fn full_client_area(hwnd: windows_sys::Win32::Foundation::HWND) {
         use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};

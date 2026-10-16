@@ -333,6 +333,7 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 - **Skins** (click the lghub-lite title, or tray menu **Skins…**): pick each built-in (Amber shows pixel digits); change a colour on a built-in: a "(mine)" skin appears and is selected; **Export current** saves a `.json`; **Load skin file…** that file back; restart: the chosen skin is kept.
 - Title bar: drag moves the widget; the left round button minimises; the right one hides it to the tray. Left-click the tray icon: the widget returns. Tray menu **Quit**: the app exits.
 - **Tray** button: `lghub-lite autostart` shows the GUI entry; click again to remove it.
+- Icons: the taskbar battery lights one cell per started 25 % of the lowest device (red at its alert level); the tray shows two bars (first two devices), checkerboard when one is off. Switch the headset off: its tray bar turns to the checkerboard. (Generated icons are byte-identical to the design's PNGs for 75 %, 50/64 %, 14 % low and offline; checked with `LGHUB_LITE_ICON_DUMP=<dir> cargo test -p lghub-lite-gui icons` and a Python compare.)
 
 **TEST REQUEST 11: measured headset curve.** Needs one full discharge, no G HUB.
 - Charge the headset fully, then use it with the app (or `lghub-lite-bg`) running until it is nearly empty or switches off, then plug it in to charge with the app still running.
