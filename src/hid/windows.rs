@@ -1,4 +1,5 @@
-//! Thin Windows HID layer: enumerate collections, open, overlapped read/write with timeouts.
+//! Windows HID backend: SetupDi enumeration, HidD/HidP caps, overlapped read/write with
+//! timeouts, WaitForMultipleObjects.
 
 use std::ffi::c_void;
 use std::io;
@@ -25,18 +26,10 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject};
 use windows_sys::core::GUID;
 
-/// One HID top-level collection (Windows exposes each as its own device path).
-#[derive(Debug, Clone)]
-pub struct Info {
-    pub path: String,
-    pub vid: u16,
-    pub pid: u16,
-    pub usage_page: u16,
-    pub usage: u16,
-    pub in_len: u16,
-    pub out_len: u16,
-    pub product: String,
-}
+use super::{Info, Signal, Wake};
+
+/// What `wait_any` waits on: a Win32 event handle.
+pub type RawWaitable = HANDLE;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -111,7 +104,28 @@ fn query(path: &str) -> io::Result<Info> {
         in_len: caps.InputReportByteLength,
         out_len: caps.OutputReportByteLength,
         product,
+        iface: group_key(path),
     })
+}
+
+/// Interface key: the device path without the `&colNN` part and the per-collection instance
+/// suffix, e.g. `vid_046d&pid_c54d&mi_02#8&22bf657e&0`, so the collections of one USB
+/// interface group together.
+fn group_key(path: &str) -> String {
+    let p = path.to_ascii_lowercase();
+    let segs: Vec<&str> = p.split('#').collect();
+    let (Some(a), Some(b)) = (segs.get(1), segs.get(2)) else {
+        return p;
+    };
+    let a = match a.find("&col") {
+        Some(i) => &a[..i],
+        None => a,
+    };
+    let b = match b.rfind('&') {
+        Some(i) => &b[..i],
+        None => b,
+    };
+    format!("{a}#{b}")
 }
 
 /// Enumerate present HID collections whose VID is `vid`. Paths not containing the VID are
@@ -196,7 +210,6 @@ pub struct Handle {
     pending: bool,
     ev: OwnedHandle,
     h: OwnedHandle,
-    pub out_len: usize,
 }
 
 impl Handle {
@@ -211,7 +224,6 @@ impl Handle {
             pending: false,
             ev,
             h,
-            out_len: info.out_len as usize,
         })
     }
 
@@ -301,21 +313,6 @@ impl Drop for Handle {
     }
 }
 
-pub enum Wake {
-    /// Input report from hs[i].
-    Report(usize, Vec<u8>),
-    /// Reading hs[i] failed, e.g. the device was unplugged (ERROR_DEVICE_NOT_CONNECTED).
-    Failed(usize, io::Error),
-    /// extras[i] was signalled.
-    Extra(usize),
-    Timeout,
-}
-
-/// Something `wait_any` can wait on besides device reads (PnP notifier, cross-thread waker).
-pub trait Signal {
-    fn event(&self) -> HANDLE;
-}
-
 /// Wait up to `timeout_ms` (`INFINITE` allowed) for an input report on any of `hs`, or for one
 /// of `extras` to be signalled. Never busy-waits: one WaitForMultipleObjects call.
 pub fn wait_any(hs: &mut [&mut Handle], extras: &[&dyn Signal], timeout_ms: u32) -> Wake {
@@ -327,7 +324,7 @@ pub fn wait_any(hs: &mut [&mut Handle], extras: &[&dyn Signal], timeout_ms: u32)
         }
     }
     let mut evs: Vec<HANDLE> = hs.iter().map(|h| h.ev.0).collect();
-    evs.extend(extras.iter().map(|s| s.event()));
+    evs.extend(extras.iter().map(|s| s.raw()));
     // SAFETY: all events are valid for the duration of the wait. At most 64 handles
     // (MAXIMUM_WAIT_OBJECTS); callers open only a few devices.
     let w = unsafe { WaitForMultipleObjects(evs.len() as u32, evs.as_ptr(), 0, timeout_ms) };
@@ -344,16 +341,6 @@ pub fn wait_any(hs: &mut [&mut Handle], extras: &[&dyn Signal], timeout_ms: u32)
     match hs[i].finish() {
         Ok(r) => Wake::Report(i, r),
         Err(e) => Wake::Failed(i, e),
-    }
-}
-
-/// Wait up to `timeout_ms` for an input report on any of `hs`.
-/// Returns Ok(None) on timeout, else (index into hs, report bytes).
-pub fn read_any(hs: &mut [&mut Handle], timeout_ms: u32) -> io::Result<Option<(usize, Vec<u8>)>> {
-    match wait_any(hs, &[], timeout_ms) {
-        Wake::Report(i, r) => Ok(Some((i, r))),
-        Wake::Failed(_, e) => Err(e),
-        Wake::Extra(_) | Wake::Timeout => Ok(None),
     }
 }
 
@@ -381,16 +368,8 @@ impl Waker {
         // SAFETY: valid event handle.
         unsafe { SetEvent(self.ev.0) };
     }
-}
 
-impl Signal for Waker {
-    fn event(&self) -> HANDLE {
-        self.ev.0
-    }
-}
-
-impl Signal for Notifier {
-    fn event(&self) -> HANDLE {
+    pub(super) fn raw_waitable(&self) -> RawWaitable {
         self.ev.0
     }
 }
@@ -459,6 +438,10 @@ impl Notifier {
         // SAFETY: valid event handle.
         while unsafe { WaitForSingleObject(self.ev.0, ms) } == WAIT_OBJECT_0 {}
     }
+
+    pub(super) fn raw_waitable(&self) -> RawWaitable {
+        self.ev.0
+    }
 }
 
 #[cfg(test)]
@@ -466,18 +449,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn waker_wakes_wait_any_from_another_thread() {
-        let w = std::sync::Arc::new(Waker::new().unwrap());
-        let w2 = w.clone();
-        let t = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            w2.wake();
-        });
-        let start = std::time::Instant::now();
-        assert!(matches!(wait_any(&mut [], &[w.as_ref()], 5000), Wake::Extra(0)));
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
-        t.join().unwrap();
-        // auto-reset: no second wake pending
-        assert!(matches!(wait_any(&mut [], &[w.as_ref()], 10), Wake::Timeout));
+    fn groups_collections_of_one_interface() {
+        let a = r"\\?\hid#vid_046d&pid_c54d&mi_02&col01#8&22bf657e&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let b = r"\\?\hid#vid_046d&pid_c54d&mi_02&col02#8&22bf657e&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let c = r"\\?\hid#vid_046d&pid_c54d&mi_01&col01#8&35ef81bc&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        assert_eq!(group_key(a), group_key(b));
+        assert_ne!(group_key(a), group_key(c));
     }
 }

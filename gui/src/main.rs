@@ -6,7 +6,7 @@
 //! blocks. Commands go UI -> worker over a channel plus `hid::Waker`; updates come back over a
 //! channel plus `request_repaint`. While the window is hidden nothing is repainted and the
 //! worker sleeps in the same WaitForMultipleObjects as `lghub-lite watch`.
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod demo;
 mod fonts;
@@ -27,7 +27,7 @@ use history::History;
 use lghub_lite::device::{Event, MODE_ONBOARD};
 use lghub_lite::hid::Waker;
 use lghub_lite::watch::{Cmd, Monitor, Snapshot, Update};
-use lghub_lite::{autostart, battery, config, hidpp};
+use lghub_lite::{autostart, battery, config, hidpp, platform};
 use skin::{Settings, Skin};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -147,11 +147,18 @@ fn main() {
         .unwrap_or_else(|| PathBuf::from("presets.txt"));
 
     let demo = demo::Options::parse(&args);
-    if demo.is_none() && !win::single_instance() {
-        win::focus_existing(TITLE);
-        return;
-    }
-    let bg_running = demo.is_none() && win::mutex_exists("Local\\lghub-lite-bg");
+    // One app per session; the lock is held until the process exits.
+    let _instance = match demo {
+        Some(_) => None,
+        None => match platform::instance_lock("gui") {
+            Some(lock) => Some(lock),
+            None => {
+                win::focus_existing(TITLE);
+                return;
+            }
+        },
+    };
+    let bg_running = demo.is_none() && platform::instance_running("bg");
 
     let big = icons::sizes().1;
     let (w, h, rgba) = (big, big, icons::app(big, None));
@@ -516,7 +523,7 @@ impl App {
             autostart::enable(&format!("\"{}\" --tray", exe.display())).and_then(|_| {
                 // The GUI now takes over from the background watcher.
                 if self.bg_running {
-                    autostart::stop_running("lghub-lite-bg.exe")?;
+                    autostart::stop_running(&platform::exe("lghub-lite-bg"))?;
                     self.bg_running = false;
                     let _ = self.tx.send(ToWorker::ApplyPresets(true));
                     self.waker.wake();
@@ -545,7 +552,7 @@ fn worker(
         let _ = tx.send(m);
         ctx.request_repaint();
     };
-    let (mut mon, first) = match Monitor::new(hidpp::DEFAULT_SWID, false, &cfg) {
+    let (mut mon, first) = match Monitor::new(hidpp::WATCH_SWID, false, &cfg) {
         Ok(v) => v,
         Err(e) => return send(FromWorker::Fatal(e.to_string())),
     };
@@ -675,12 +682,10 @@ fn build_tray(ctx: &egui::Context, flags: Arc<TrayFlags>) -> Option<TrayIcon> {
     Some(tray)
 }
 
-/// Small Win32 helpers: single instance, bringing an existing window forward, file dialogs.
+/// Small Win32 helpers: bringing an existing window forward, file dialogs, window icons.
 mod win {
     use std::path::PathBuf;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
-    use windows_sys::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
     use windows_sys::Win32::UI::Controls::Dialogs::{
         GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OPENFILENAMEW,
     };
@@ -688,27 +693,6 @@ mod win {
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(Some(0)).collect()
-    }
-
-    /// True if this is the only GUI instance. The mutex lives until the process exits.
-    pub fn single_instance() -> bool {
-        let name = wide("Local\\lghub-lite-gui");
-        // SAFETY: NUL-terminated name, default security.
-        let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
-        // SAFETY: thread-local error right after the call.
-        h.is_null() || unsafe { GetLastError() } != ERROR_ALREADY_EXISTS
-    }
-
-    /// True if a named mutex exists (used to detect a running lghub-lite-bg).
-    pub fn mutex_exists(name: &str) -> bool {
-        let n = wide(name);
-        // SAFETY: NUL-terminated name; handle closed right away.
-        let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, n.as_ptr()) };
-        if h.is_null() {
-            return false;
-        }
-        unsafe { CloseHandle(h) };
-        true
     }
 
     pub fn focus_existing(title: &str) {

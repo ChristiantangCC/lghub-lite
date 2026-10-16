@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use lghub_lite::device::parse_selector;
 use lghub_lite::hidpp::{self, DIRECT, Error, Hidpp};
-use lghub_lite::{LOGITECH_VID, audio, autostart, battery, config, device, hid, profiles, verbose, watch};
+use lghub_lite::{LOGITECH_VID, audio, autostart, battery, config, device, hid, platform, profiles, verbose, watch};
 
 const USAGE: &str = "\
 lghub-lite: control Logitech HID++ mice and headsets without G HUB.
@@ -89,7 +89,15 @@ fn main() {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let r = match a.as_slice() {
         ["devices"] => devices(&opts),
-        ["watch"] => opts.config_path().and_then(|c| watch::run(opts.swid, opts.trace, &c)),
+        ["watch"] => {
+            // a watcher gets its own software ID unless --swid chose one (see WATCH_SWID)
+            let swid = if opts.swid == hidpp::DEFAULT_SWID {
+                hidpp::WATCH_SWID
+            } else {
+                opts.swid
+            };
+            opts.config_path().and_then(|c| watch::run(swid, opts.trace, &c))
+        }
         ["autostart"] => autostart_cmd(&opts, None),
         ["autostart", "on"] => autostart_cmd(&opts, Some(true)),
         ["autostart", "off"] => autostart_cmd(&opts, Some(false)),
@@ -549,15 +557,12 @@ fn curve(h: &mut Hidpp, dev: u8, dir: &std::path::Path, build: bool) -> Result<(
 fn autostart_cmd(o: &Opts, set: Option<bool>) -> Result<(), Error> {
     let bg = std::env::current_exe()
         .map_err(|e| Error::Io(e.to_string()))?
-        .with_file_name("lghub-lite-bg.exe");
+        .with_file_name(platform::exe("lghub-lite-bg"));
     match set {
         None => {}
         Some(true) => {
             if !bg.exists() {
-                return Err(Error::Other(format!(
-                    "{} not found next to lghub-lite.exe",
-                    bg.display()
-                )));
+                return Err(Error::Other(format!("{} not found next to lghub-lite", bg.display())));
             }
             let mut cmd = format!("\"{}\"", bg.display());
             if let Some(c) = &o.config {
@@ -570,7 +575,7 @@ fn autostart_cmd(o: &Opts, set: Option<bool>) -> Result<(), Error> {
         }
         Some(false) => {
             autostart::disable().map_err(|e| Error::Io(e.to_string()))?;
-            let n = autostart::stop_running("lghub-lite-bg.exe").map_err(|e| Error::Io(e.to_string()))?;
+            let n = autostart::stop_running(&platform::exe("lghub-lite-bg")).map_err(|e| Error::Io(e.to_string()))?;
             println!("autostart  off (stopped {n} running watcher(s))");
         }
     }

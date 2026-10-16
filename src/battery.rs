@@ -310,6 +310,9 @@ pub const GHUB_DEPOTS: &str = r"C:\ProgramData\LGHUB\depots";
 /// folders deep, file names containing "battery"). Only used when the user asks to import one;
 /// lghub-lite never reads G HUB's folders otherwise.
 pub fn find_ghub_curve(model: u16) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None; // G HUB exists only on Windows
+    }
     fn walk(dir: &Path, depth: u8, model: u16) -> Option<PathBuf> {
         for e in fs::read_dir(dir).ok()?.flatten() {
             let path = e.path();

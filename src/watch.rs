@@ -1,5 +1,5 @@
-//! `watch`: long-running, event-driven monitor. `Monitor::next` blocks in a single
-//! WaitForMultipleObjects on every open HID++ collection plus the PnP notification event (and
+//! `watch`: long-running, event-driven monitor. `Monitor::next` blocks in a single wait
+//! (`hid::wait_any`) on every open HID++ collection plus the PnP notification (and
 //! an optional cross-thread `Waker`), so it uses no CPU while nothing happens. The one
 //! exception: headsets that report battery only as a voltage (0x1F20) are read every
 //! BATTERY_POLL, because no unsolicited 0x1F20 event has been seen on hardware (G HUB polls it
@@ -14,10 +14,6 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::SYSTEMTIME;
-use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-use windows_sys::Win32::System::Threading::INFINITE;
-
 use crate::audio::{self, Adc};
 use crate::battery::{self, Curve};
 use crate::config::{self, Preset};
@@ -27,13 +23,7 @@ use crate::hidpp::{self, DIRECT, Error, GET_REGISTER, Hidpp};
 
 /// Local wall-clock time for log lines, e.g. `2026-10-15 22:31:02`.
 pub fn now() -> String {
-    let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
-    // SAFETY: valid out-pointer.
-    unsafe { GetLocalTime(&mut t) };
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
-    )
+    crate::platform::local_time_text()
 }
 
 /// `println!` with a timestamp, so watch output (and the background log) is a history.
@@ -277,11 +267,11 @@ impl Monitor {
         }
         let polling = self.live.iter().any(|l| l.devs.iter().any(|d| d.has_voltage));
         let timeout = if polling {
-            // < INFINITE, so a long wait can never be mistaken for "no timeout"
+            // < FOREVER, so a long wait can never be mistaken for "no timeout"
             let ms = self.next_poll.saturating_duration_since(Instant::now()).as_millis();
             ms.min(u32::MAX as u128 - 1) as u32
         } else {
-            INFINITE
+            hid::FOREVER
         };
         let got = {
             let mut hs = Vec::new();
@@ -330,7 +320,7 @@ impl Monitor {
     /// Re-enumerate HID++ interfaces: drop the ones that disappeared, open and describe new ones.
     fn sync(&mut self, out: &mut Vec<Update>) -> Result<(), Error> {
         let ifs = device::interfaces()?;
-        let keys: Vec<String> = ifs.iter().map(|f| device::group_key(&f.cols[0].path)).collect();
+        let keys: Vec<String> = ifs.iter().map(|f| f.cols[0].iface.clone()).collect();
         let (keep, gone): (Vec<Live>, Vec<Live>) = std::mem::take(&mut self.live)
             .into_iter()
             .partition(|l| keys.contains(&l.key));

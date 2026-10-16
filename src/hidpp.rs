@@ -25,9 +25,15 @@ pub const ERR10: u8 = 0x8F;
 // HID++ 2.0 error "feature index". [OBS §9.5]
 pub const ERR20: u8 = 0xFF;
 
-/// Our software ID. G HUB uses a random 0x0A..0x0E [OBS §9.4]; 0x03 keeps us out of
-/// that range. [INF] choice, not a protocol constant.
+/// Our software ID for one-shot CLI commands. G HUB uses a random 0x0A..0x0E [OBS §9.4];
+/// 0x03 keeps us out of that range. [INF] choice, not a protocol constant.
 pub const DEFAULT_SWID: u8 = 0x03;
+
+/// The long-running watchers (app, lghub-lite-bg) use their own ID: every program reading a
+/// device sees every input report, and with the same ID a CLI command could take a watcher's
+/// reply to the same request (e.g. two root GetFeature calls) for its own [HW 2026-10-16: a
+/// DPI read-back saw another feature's version while the app refreshed after a DPI event].
+pub const WATCH_SWID: u8 = 0x04;
 
 pub fn report_id_for_len(len: usize) -> Option<u8> {
     match len {
@@ -182,9 +188,41 @@ pub fn hex(b: &[u8]) -> String {
 /// traffic) are kept for `queued`, up to this many; older ones are dropped.
 const QUEUE_MAX: usize = 64;
 
+/// Where a report of one output length goes: which open device node, and its length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Route {
+    out_len: usize,
+    handle: usize,
+}
+
+/// Open one handle per distinct device path and a route per collection, smallest output
+/// report first so "first that fits" picks like G HUB [OBS §9.3]. On Windows every collection
+/// is its own path; on Linux the short and long reports share one hidraw node, which must be
+/// opened once or every input report would arrive twice.
+fn plan_routes(infos: &[hid::Info]) -> (Vec<&hid::Info>, Vec<Route>) {
+    let mut nodes: Vec<&hid::Info> = Vec::new();
+    let mut routes = Vec::new();
+    for i in infos {
+        let handle = match nodes.iter().position(|n| n.path == i.path) {
+            Some(h) => h,
+            None => {
+                nodes.push(i);
+                nodes.len() - 1
+            }
+        };
+        routes.push(Route {
+            out_len: i.out_len as usize,
+            handle,
+        });
+    }
+    routes.sort_by_key(|r| r.out_len);
+    (nodes, routes)
+}
+
 /// A HID++ endpoint: the short and/or long collection of one physical interface.
 pub struct Hidpp {
     cols: Vec<Handle>,
+    routes: Vec<Route>,
     queue: VecDeque<Vec<u8>>,
     pub swid: u8,
     pub trace: bool,
@@ -196,15 +234,14 @@ pub struct Hidpp {
 
 impl Hidpp {
     pub fn open(infos: &[hid::Info], swid: u8, trace: bool) -> Result<Hidpp, Error> {
+        let (nodes, routes) = plan_routes(infos);
         let mut cols = Vec::new();
-        for i in infos {
-            let h = Handle::open(i).map_err(|e| Error::Io(open_hint(&i.path, e)))?;
-            cols.push(h);
+        for i in nodes {
+            cols.push(Handle::open(i).map_err(|e| Error::Io(open_hint(&i.path, e)))?);
         }
-        // Smallest output report first so "first that fits" picks like G HUB. [OBS §9.3]
-        cols.sort_by_key(|h| h.out_len);
         Ok(Hidpp {
             cols,
+            routes,
             queue: VecDeque::new(),
             swid,
             trace,
@@ -226,21 +263,23 @@ impl Hidpp {
     /// Write `msg` to the first collection whose output report fits it, zero-padded and
     /// with byte 0 rewritten to that collection's report ID. [OBS §9.3 Win32Device::write]
     fn write(&self, msg: &[u8]) -> Result<(), Error> {
-        let col = self
-            .cols
+        let route = self
+            .routes
             .iter()
-            .find(|c| c.out_len >= msg.len() && report_id_for_len(c.out_len).is_some())
+            .find(|r| r.out_len >= msg.len() && report_id_for_len(r.out_len).is_some())
             .ok_or(Error::Other(format!(
                 "message of {} bytes exceeds every output report",
                 msg.len()
             )))?;
         let mut r = msg.to_vec();
-        r.resize(col.out_len, 0);
-        r[0] = report_id_for_len(col.out_len).unwrap_or(r[0]);
+        r.resize(route.out_len, 0);
+        r[0] = report_id_for_len(route.out_len).unwrap_or(r[0]);
         if self.trace {
             eprintln!("-> {}", hex(&r));
         }
-        col.write(&r, 1000).map_err(|e| Error::Io(e.to_string()))
+        self.cols[route.handle]
+            .write(&r, 1000)
+            .map_err(|e| Error::Io(e.to_string()))
     }
 
     /// Read one input report from any collection; None on timeout.
@@ -344,9 +383,17 @@ impl Hidpp {
 }
 
 fn open_hint(path: &str, e: std::io::Error) -> String {
+    #[cfg(windows)]
     let hint = match e.raw_os_error() {
         Some(5) => " (access denied: collection is held exclusively)",
         Some(32) => " (sharing violation: another program opened it without sharing)",
+        _ => "",
+    };
+    #[cfg(not(windows))]
+    let hint = match e.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            " (permission denied: install the udev rule packaging/linux/70-lghub-lite.rules, see the README)"
+        }
         _ => "",
     };
     format!("open {path}: {e}{hint}")
@@ -423,6 +470,43 @@ pub fn feature_name(id: u16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn col(path: &str, out_len: u16) -> hid::Info {
+        hid::Info {
+            path: path.into(),
+            vid: 0x46D,
+            pid: 0xC54D,
+            usage_page: 0xFF00,
+            usage: if out_len == 7 { 1 } else { 2 },
+            in_len: out_len,
+            out_len,
+            product: String::new(),
+            iface: "i".into(),
+        }
+    }
+
+    #[test]
+    fn routes_open_each_node_once() {
+        // Windows: one path per collection -> two handles, short report first
+        let win = [col("long", 20), col("short", 7)];
+        let (nodes, routes) = plan_routes(&win);
+        assert_eq!(
+            nodes.iter().map(|n| n.path.as_str()).collect::<Vec<_>>(),
+            ["long", "short"]
+        );
+        assert_eq!(
+            routes,
+            [Route { out_len: 7, handle: 1 }, Route { out_len: 20, handle: 0 }]
+        );
+        // Linux: both collections on one hidraw node -> one handle, two routes
+        let lin = [col("/dev/hidraw3", 7), col("/dev/hidraw3", 20)];
+        let (nodes, routes) = plan_routes(&lin);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            routes,
+            [Route { out_len: 7, handle: 0 }, Route { out_len: 20, handle: 0 }]
+        );
+    }
 
     #[test]
     fn receiver_conn_state_request_bytes() {

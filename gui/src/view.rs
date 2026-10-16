@@ -988,7 +988,7 @@ impl App {
                         "Import from G HUB" => import = ghub.clone(),
                         "Open folder" => {
                             let _ = std::fs::create_dir_all(&self.dir);
-                            let _ = std::process::Command::new("explorer").arg(&self.dir).spawn();
+                            lghub_lite::platform::open_folder(&self.dir);
                         }
                         _ => {}
                     }

@@ -27,30 +27,11 @@ pub fn is_hidpp(i: &hid::Info) -> bool {
     }
 }
 
-/// Group key: interface path without the `&colNN` part and the per-collection instance
-/// suffix, e.g. `vid_046d&pid_c54d&mi_02#8&22bf657e&0`.
-pub fn group_key(path: &str) -> String {
-    let p = path.to_ascii_lowercase();
-    let segs: Vec<&str> = p.split('#').collect();
-    let (Some(a), Some(b)) = (segs.get(1), segs.get(2)) else {
-        return p;
-    };
-    let a = match a.find("&col") {
-        Some(i) => &a[..i],
-        None => a,
-    };
-    let b = match b.rfind('&') {
-        Some(i) => &b[..i],
-        None => b,
-    };
-    format!("{a}#{b}")
-}
-
 pub fn interfaces() -> Result<Vec<Iface>, Error> {
     let all = hid::enumerate(crate::LOGITECH_VID).map_err(|e| Error::Io(e.to_string()))?;
     let mut out: Vec<(String, Iface)> = Vec::new();
     for i in all.into_iter().filter(is_hidpp) {
-        let k = group_key(&i.path);
+        let k = i.iface.clone();
         match out.iter_mut().find(|(key, _)| *key == k) {
             Some((_, g)) => g.cols.push(i),
             None => out.push((
@@ -827,6 +808,7 @@ mod tests {
             in_len: out,
             out_len: out,
             product: String::new(),
+            iface: String::new(),
         }
     }
 
@@ -840,15 +822,6 @@ mod tests {
         assert!(!is_hidpp(&info(0x000C, 1, 0)));
         assert!(!is_hidpp(&info(0xFF43, 0x0203, 20))); // LL not a single bit
         assert!(!is_hidpp(&info(0xFF43, 0x0102, 20))); // HH & LL == 0
-    }
-
-    #[test]
-    fn groups_collections_of_one_interface() {
-        let a = r"\\?\hid#vid_046d&pid_c54d&mi_02&col01#8&22bf657e&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-        let b = r"\\?\hid#vid_046d&pid_c54d&mi_02&col02#8&22bf657e&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-        let c = r"\\?\hid#vid_046d&pid_c54d&mi_01&col01#8&35ef81bc&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-        assert_eq!(group_key(a), group_key(b));
-        assert_ne!(group_key(a), group_key(c));
     }
 
     #[test]

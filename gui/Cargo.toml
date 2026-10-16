@@ -22,8 +22,6 @@ tray-icon = "0.26"
 raw-window-handle = "0.6" # already part of eframe; gives the HWND for the borderless fix
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_Threading",       # single-instance mutex
     "Win32_UI_Controls_Dialogs",    # open/save dialogs for skin files
     "Win32_UI_HiDpi",               # icon sizes for the system DPI
     "Win32_UI_Shell",               # window subclass: borderless window without the 1 px top line

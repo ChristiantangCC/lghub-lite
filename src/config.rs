@@ -18,9 +18,10 @@ pub struct Preset {
     pub rate: Option<u32>,
 }
 
-/// `%APPDATA%\lghub-lite\presets.txt`.
+/// `presets.txt` in the settings folder: `%APPDATA%\lghub-lite` on Windows,
+/// `$XDG_CONFIG_HOME/lghub-lite` (or `~/.config/lghub-lite`) on Linux.
 pub fn default_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("lghub-lite").join("presets.txt"))
+    crate::platform::config_dir().map(|d| d.join("presets.txt"))
 }
 
 /// A report rate the HID++ 0x8061 bitmap can express (125 << bit, bit 0..=6). [PUB]
