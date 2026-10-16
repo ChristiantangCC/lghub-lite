@@ -60,11 +60,26 @@ struct Row {
     demo: Option<[&'static str; 3]>,
 }
 
+/// The charge state word of a battery line like `95% level=full discharging external=none`:
+/// "discharging", "charging" (also "slow charging"), "full" or "error". Matched as a whole word,
+/// so `level=full` (the level range) is not taken for a full charge.
+fn charge_state(battery: &str) -> Option<&'static str> {
+    battery.split_whitespace().find_map(|w| match w {
+        "discharging" => Some("Discharging"),
+        "charging" => Some("Charging"),
+        "full" => Some("Full"),
+        "error" => Some("Charge error"),
+        _ => None,
+    })
+}
+
 impl Row {
+    /// On external power: charging or charged.
     fn charging(&self) -> bool {
         self.battery
             .as_deref()
-            .is_some_and(|b| b.contains("charging") && !b.contains("discharging") || b.contains("full"))
+            .and_then(charge_state)
+            .is_some_and(|s| s == "Charging" || s == "Full")
     }
 }
 
@@ -753,5 +768,27 @@ mod win {
         }
         let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::charge_state;
+
+    #[test]
+    fn level_full_is_not_a_charge_state() {
+        assert_eq!(
+            charge_state("95% level=full discharging external=none"),
+            Some("Discharging")
+        );
+        assert_eq!(
+            charge_state("40% level=good slow charging external=wired"),
+            Some("Charging")
+        );
+        assert_eq!(charge_state("100% level=full full external=wired"), Some("Full"));
+        assert_eq!(
+            charge_state("≈62%  (3858 mV, flags=0x01, generic Li-ion estimate)"),
+            None
+        );
     }
 }

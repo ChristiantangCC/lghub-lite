@@ -324,12 +324,8 @@ impl App {
         let status = if !r.online {
             "Offline".to_string()
         } else if let Some(b) = r.battery.as_deref() {
-            if b.contains("discharging") {
-                "Discharging".into()
-            } else if b.contains("full") {
-                "Full".into()
-            } else if b.contains("charging") {
-                "Charging".into()
+            if let Some(state) = crate::charge_state(b) {
+                state.into()
             } else if voltage.is_some() || b.contains(" mV") {
                 "Discharging".into() // a voltage-only battery: charging is not detected yet
             } else {
