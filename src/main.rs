@@ -14,7 +14,7 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   devices                  list HID++ devices, including those behind receivers
   watch                    print plug/unplug, receiver connect/disconnect and setting events;
                            applies presets whenever a device connects
-  autostart [on|off]       run the windowless watcher (lghub-lite-bg.exe) at login, or stop it
+  autostart [on|off]       run the background watcher (lghub-lite-bg) at login, or stop it
   presets                  show the preset file
   preset <dev> [dpi=N] [rate=HZ] | clear
                            save (or remove) the preset for this device's model
@@ -33,7 +33,8 @@ usage: lghub-lite [--trace] [--verbose] [--swid N] [--config FILE] <command>
   collections              list every Logitech HID collection (debug)
 
 <dev> is PID[:INDEX] as printed by `devices`, e.g. c54d:1 (receiver slot 1) or 0aba.
-Presets live in %APPDATA%\\lghub-lite\\presets.txt unless --config is given.";
+Presets live in presets.txt in the settings folder (Windows: %APPDATA%\\lghub-lite,
+Linux: ~/.config/lghub-lite) unless --config is given.";
 
 struct Opts {
     trace: bool,
@@ -47,7 +48,7 @@ impl Opts {
         self.config
             .clone()
             .or_else(config::default_path)
-            .ok_or_else(|| Error::Other("APPDATA is not set; pass --config FILE".into()))
+            .ok_or_else(|| Error::Other("no settings folder (APPDATA / HOME not set); pass --config FILE".into()))
     }
 
     /// Folder holding the preset file; battery curves and recordings live here too.
