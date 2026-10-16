@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,19 +24,56 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          $name = "lghub-lite-$tag-windows-x64"
+          $name = "lghub-lite-${{ github.ref_name }}-windows-x64"
           New-Item -ItemType Directory $name | Out-Null
           Copy-Item gui\target\release\lghub-lite-gui.exe, target\release\lghub-lite.exe, target\release\lghub-lite-bg.exe, README.md, LICENSE $name
           New-Item -ItemType Directory "$name\fonts" | Out-Null
           Copy-Item gui\fonts\*.txt, gui\fonts\README.md "$name\fonts"
           Compress-Archive -Path "$name\*" -DestinationPath "$name.zip"
           (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File "$name.zip.sha256" -Encoding ascii
-          "ASSET=$name" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: lghub-lite-*-windows-x64.zip*
+
+  linux:
+    # Experimental: built and unit-tested here, not tested on Linux hardware.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - run: cargo build --release
+      - run: cargo test
+        working-directory: gui
+      - run: cargo build --release
+        working-directory: gui
+      - name: Package
+        run: |
+          name="lghub-lite-${{ github.ref_name }}-linux-x64-experimental"
+          mkdir -p "$name/fonts"
+          cp target/release/lghub-lite target/release/lghub-lite-bg gui/target/release/lghub-lite-gui "$name/"
+          cp -r packaging/linux/70-lghub-lite.rules packaging/linux/lghub-lite.desktop packaging/linux/icons "$name/"
+          cp packaging/linux/INSTALL-linux.md README.md LICENSE "$name/"
+          cp gui/fonts/*.txt gui/fonts/README.md "$name/fonts/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: lghub-lite-*-linux-x64-experimental.tar.gz*
+
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
       - name: Publish
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" "$env:ASSET.zip" "$env:ASSET.zip.sha256" `
+          gh release create "${{ github.ref_name }}" lghub-lite-* \
+            --repo "${{ github.repository }}" \
             --title "lghub-lite ${{ github.ref_name }}" --generate-notes --prerelease

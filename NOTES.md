@@ -215,6 +215,22 @@ HID++ 2.0 events have swid 0 and fn 0 on a known feature index [OBS §9.5].
     - byte 0 = 3 would match the 0x8061 rate bit for 1000 Hz, and 800 is the DPI the device reports in onboard mode.
     - Field meanings need [PUB] libratbag format docs plus hardware confirmation before any decode or write.
 
+### Linux backend (2026-10-16, experimental)
+All [INF]: written without Linux hardware. It compiles and passes clippy for
+`x86_64-unknown-linux-gnu`, and the CI unit tests run on Ubuntu. Nothing has been checked against a real device.
+- **Layout:** the per-OS code lives in `src/hid/{windows,linux}.rs`, `src/platform/*` and `src/autostart/*`, plus `gui/src/{os,tray}/*`. Everything else is shared.
+- **Enumeration:** `/sys/class/hidraw/hidrawN/device` gives `uevent` (`HID_ID=bus:vid:pid`, `HID_NAME`) and `report_descriptor`.
+  - `hid/descriptor.rs` turns the descriptor into one `Info` per top-level collection: page, usage, and the longest input/output report including the ID byte, the same numbers as Windows HidP_GetCaps. Tested with synthetic spec descriptors; on the receiver layout it gives FF00/1 = 7/7 and FF00/2 = 20/20, matching the [HW] Windows values.
+  - All collections of a node share `path` (`/dev/hidrawN`). `iface` is the canonical sysfs device path.
+- **One handle per node:** `Hidpp::open` routes each output length to one handle per distinct path. Opening a hidraw node twice would deliver each input report twice.
+- **Receivers:** `hid-logitech-dj` adds virtual HID devices under the receiver's HID device. Nodes whose parent directory is itself a HID device (`0003:046D:C54D.0007/...`) are skipped, and devices are reached through the receiver by index, as Solaar does.
+- **Waiting:** `poll(2)` on the hidraw fds plus an eventfd (`Waker`) and a `NETLINK_KOBJECT_UEVENT` socket (`Notifier`). `Signal::consume` gives auto-reset semantics.
+  - Writes are synchronous in the kernel, so the write timeout only applies while a node is not writable.
+- **Coexistence:** the kernel's `hid-logitech-hidpp` driver also talks HID++. Our software IDs differ (CLI 0x03, watchers 0x04), and replies are matched on the ID.
+- **Access:** `/dev/hidraw*` is root-only by default. `packaging/linux/70-lghub-lite.rules` adds `TAG+="uaccess"` for vendor 046d.
+- **Paths:** `$XDG_CONFIG_HOME/lghub-lite` (or `~/.config/lghub-lite`). Instance locks are flock files in `$XDG_RUNTIME_DIR`. Autostart uses `~/.config/autostart/lghub-lite.desktop`.
+- **App:** eframe x11 + wayland. The tray is ksni (StatusNotifierItem over D-Bus, async-io runtime, no GTK); without an SNI host the app runs without a tray. A second launch sends "show" over a Unix socket. Skin file dialogs use zenity or kdialog if installed. App id `lghub-lite` matches the desktop entry.
+
 ### Headset (PRO X Wireless, 0aba, HID++ 4.2 on FF43/0202)
 Features: 0x1F20 at index 6, 0x8300 at 5, 0x8310 at 4. [HW]
 
@@ -335,6 +351,11 @@ TEST REQUEST 5 (hot-plug and wireless connect/disconnect with `watch`) passed on
 - Title bar: drag moves the widget; the left round button minimises; the right one hides it to the tray. Left-click the tray icon: the widget returns. Tray menu **Quit**: the app exits.
 - **Tray** button: `lghub-lite autostart` shows the GUI entry; click again to remove it.
 - Icons: the taskbar battery lights one cell per started 25 % of the lowest device (red at its alert level); the tray shows two bars (first two devices), checkerboard when one is off. Switch the headset off: its tray bar turns to the checkerboard. (Generated icons are byte-identical to the design's PNGs for 75 %, 50/64 %, 14 % low and offline; checked with `LGHUB_LITE_ICON_DUMP=<dir> cargo test -p lghub-lite-gui icons` and a Python compare.)
+
+**TEST REQUEST 12: Linux.** Needs a Linux machine (a live USB stick is enough) and the receiver or headset.
+- Install the udev rule (packaging/linux/INSTALL-linux.md), replug, then run `./lghub-lite collections`. Expected: the receiver's FF00/1 (7/7) and FF00/2 (20/20) collections on one `/dev/hidrawN`, and the headset's FF43 collection. No separate node for the paired mouse.
+- Run `./lghub-lite devices`, `battery c54d:1`, `dpi c54d:1`, and `watch` with an unplug and replug. All should match Windows.
+- Run `./lghub-lite-gui`: both devices listed, a tray icon on KDE/XFCE (on GNOME with the AppIndicator extension), and Tray adds `~/.config/autostart/lghub-lite.desktop`.
 
 **TEST REQUEST 11: measured headset curve.** Needs one full discharge, no G HUB.
 - Charge the headset fully, then use it with the app (or `lghub-lite-bg`) running until it is nearly empty or switches off, then plug it in to charge with the app still running.

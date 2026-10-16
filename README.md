@@ -16,10 +16,14 @@ usually be listed and readable, but writes are only verified where marked.
 
 ## Platforms
 
-- **Windows 10/11**: supported (the CLI, the background watcher and the app).
-- **Linux**: planned. The device layer and the app are Windows-only today; a Linux backend
-  (hidraw, udev) is on the list but not written yet. When it lands it will be untested on real
-  hardware at first, so device reports from Linux users will be very welcome.
+- **Windows 10/11**: supported and tested on hardware (the CLI, the background watcher and
+  the app).
+- **Linux (x86-64)**: **experimental, untested on hardware.** The CLI, the background watcher
+  and the app all build for Linux (hidraw for the devices, a StatusNotifierItem tray icon, XDG
+  autostart), and every automatic test passes there, but nobody has tried them with a real
+  mouse or headset yet. If you run Linux, a
+  [device report](../../issues/new?template=device-report.md) is very welcome. Setup:
+  [packaging/linux/INSTALL-linux.md](packaging/linux/INSTALL-linux.md).
 
 ## CLI first, app optional
 
@@ -40,9 +44,15 @@ Have a different device? Run `lghub-lite devices` and `lghub-lite info <dev>` an
 
 ## Install
 
+**Windows**
+
 1. Download `lghub-lite-<version>-windows-x64.zip` from [Releases](../../releases) and unzip
    it anywhere, for example `C:\Tools\lghub-lite\`.
 2. Double-click `lghub-lite-gui.exe`, or open PowerShell in that folder for the command-line tool.
+
+**Linux (experimental)**: download `lghub-lite-<version>-linux-x64-experimental.tar.gz`,
+unpack it and follow its `INSTALL-linux.md`. The one required step is a udev rule, so that
+your user may open the devices without root.
 
 The executables are not code-signed, so Windows SmartScreen may warn the first time; choose
 "More info" → "Run anyway", or build from source (below).
@@ -221,15 +231,15 @@ logs live in its folder).
 
 ## Build from source
 
-Requires the Rust MSVC toolchain.
+Requires Rust (the MSVC toolchain on Windows).
 
 ```text
 cargo build --release
 ```
 
-builds `lghub-lite.exe` (CLI) and `lghub-lite-bg.exe` (background watcher) in
-`target\release\`. They need Rust 1.88+ and depend only on
-[`windows-sys`](https://crates.io/crates/windows-sys) (raw Windows API bindings).
+builds `lghub-lite` (CLI) and `lghub-lite-bg` (background watcher) in `target/release/`. They
+need Rust 1.88+ and have a single dependency: [`windows-sys`](https://crates.io/crates/windows-sys)
+on Windows, [`libc`](https://crates.io/crates/libc) on Linux.
 
 The app is its own project in `gui/` (it uses the CLI's code as a library):
 
@@ -238,8 +248,9 @@ cd gui
 cargo build --release
 ```
 
-builds `gui\target\release\lghub-lite-gui.exe`. It uses [egui](https://github.com/emilk/egui)
-and [tray-icon](https://crates.io/crates/tray-icon) and needs Rust 1.95+.
+builds `gui/target/release/lghub-lite-gui`. It uses [egui](https://github.com/emilk/egui) and
+needs Rust 1.95+; the tray icon comes from [tray-icon](https://crates.io/crates/tray-icon) on
+Windows and [ksni](https://crates.io/crates/ksni) (D-Bus, no GTK) on Linux.
 `lghub-lite-gui.exe --demo` shows sample devices without touching any hardware (that is how the
 screenshots above were made).
 

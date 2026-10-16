@@ -33,6 +33,35 @@ jobs:
         shell: pwsh
         run: Get-ChildItem target\release\lghub-lite*.exe, gui\target\release\lghub-lite-gui.exe | Format-Table Name, Length
 
+  linux:
+    # Experimental platform: built, linted and unit-tested here; no Linux hardware tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: gui
+      - run: cargo test
+        working-directory: gui
+      - run: cargo build --release
+        working-directory: gui
+      - name: Smoke test the app (demo mode, virtual X display, software OpenGL)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq xvfb libgl1-mesa-dri libegl1 libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2
+          set +e
+          timeout 15s xvfb-run -a ./gui/target/release/lghub-lite-gui --demo
+          code=$?
+          # still running after 15 s (killed by timeout, 124) = started and kept rendering
+          echo "exit code $code"; [ "$code" -eq 124 ]
+      - name: Binary sizes
+        run: ls -l target/release/lghub-lite target/release/lghub-lite-bg gui/target/release/lghub-lite-gui
+
   msrv:
     # The core's rust-version (CLI + background watcher) must really build.
     # The app follows eframe's own minimum (see gui/Cargo.toml).
