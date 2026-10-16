@@ -15,15 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
-      - run: cargo build --release --workspace
+      - run: cargo test
+      - run: cargo build --release
+      - run: cargo test
+        working-directory: gui
+      - run: cargo build --release
+        working-directory: gui
       - name: Package
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $name = "lghub-lite-$tag-windows-x64"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target\release\lghub-lite-gui.exe, target\release\lghub-lite.exe, target\release\lghub-lite-bg.exe, README.md, LICENSE $name
+          Copy-Item gui\target\release\lghub-lite-gui.exe, target\release\lghub-lite.exe, target\release\lghub-lite-bg.exe, README.md, LICENSE $name
           New-Item -ItemType Directory "$name\fonts" | Out-Null
           Copy-Item gui\fonts\*.txt, gui\fonts\README.md "$name\fonts"
           Compress-Archive -Path "$name\*" -DestinationPath "$name.zip"

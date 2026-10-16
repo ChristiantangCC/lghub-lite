@@ -8,6 +8,9 @@ license = "MIT"
 repository = "https://github.com/Skyttehehe/lghub-lite"
 publish = false
 
+# A project of its own, not part of the root: the CLI builds without it, and gui/ can be deleted.
+[workspace]
+
 [[bin]]
 name = "lghub-lite-gui"
 path = "src/main.rs"
@@ -26,3 +29,10 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Shell",               # window subclass: borderless window without the 1 px top line
     "Win32_UI_WindowsAndMessaging", # show/hide the window from the tray
 ] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

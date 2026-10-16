@@ -1,9 +1,11 @@
 # lghub-lite
 
-Lightweight Windows tools for Logitech HID++ mice and headsets: DPI, report rate, battery,
-presets applied on connect. A small desktop app with a tray icon, plus a ~300 KB command-line
-tool and background watcher. No installer, no services, no network access, no telemetry, and
+A lightweight **command-line tool** for Logitech HID++ mice and headsets: DPI, report rate,
+battery, presets applied on connect. A ~300 KB CLI and background watcher, with an optional
+small desktop app on top. No installer, no services, no network access, no telemetry, and
 **no Logitech G HUB required**.
+
+<p align="center"><img src="docs/screenshots/widget.png" width="420" alt="The lghub-lite battery widget showing a mouse at 53 %"></p>
 
 > **Not affiliated with or endorsed by Logitech.** "Logitech", "G HUB", "LIGHTSPEED" and
 > product names are trademarks of their owners and are used here only to describe
@@ -11,6 +13,20 @@ tool and background watcher. No installer, no services, no network access, no te
 
 **Status: 0.2 beta.** It works on the devices in the table below. Other HID++ devices will
 usually be listed and readable, but writes are only verified where marked.
+
+## Platforms
+
+- **Windows 10/11**: supported (the CLI, the background watcher and the app).
+- **Linux**: planned. The device layer and the app are Windows-only today; a Linux backend
+  (hidraw, udev) is on the list but not written yet. When it lands it will be untested on real
+  hardware at first, so device reports from Linux users will be very welcome.
+
+## CLI first, app optional
+
+lghub-lite is a command-line tool at heart: everything the app does, the CLI can do too (see
+[Command line: quick start](#command-line-quick-start)). The app lives in its own folder,
+`gui/`, as a separate project. If you only want the CLI, you can simply **delete the `gui`
+folder**; the rest builds and works the same, with a single dependency.
 
 ## Tested devices
 
@@ -37,6 +53,8 @@ Manager → Startup apps).
 
 ## The app
 
+<p align="center"><img src="docs/screenshots/skins-strip.png" alt="The widget in four built-in skins: Gunmetal, Amber CRT, Arctic and Synthline"></p>
+
 Double-click **`lghub-lite-gui.exe`**. It opens a small battery widget:
 
 - **The display** shows the selected device: battery percentage, time left, drain per hour,
@@ -47,7 +65,7 @@ Double-click **`lghub-lite-gui.exe`**. It opens a small battery widget:
   of readings.
 - **◀ ▶** or a click in the **Devices** list switches device.
 - **Alert at** sets the low-battery level for this device (red line). When a device on battery
-  drops to it, the widget pops up and the tray icon turns red.
+  drops to it, the widget pops up and its bar in the tray icon turns red.
 - **Tray** starts the app at login, in the tray, so presets are applied from login on. That
   replaces the command-line `autostart` entry, so only one of them runs.
 - **Settings** opens the device drawer. For a mouse: **DPI** (type a value, **Apply**),
@@ -56,10 +74,15 @@ Double-click **`lghub-lite-gui.exe`**. It opens a small battery widget:
   saved as the mouse's preset, so it is applied again whenever the mouse connects; **Use
   onboard** goes back and removes the preset. For a headset: the battery curve and its
   recording.
+
+  <p align="center"><img src="docs/screenshots/drawer-mouse.png" width="380" alt="Settings drawer for a mouse: DPI, report rate, mode"> <img src="docs/screenshots/drawer-headset.png" width="380" alt="Settings drawer for a headset: battery curve"></p>
+
 - **Skins** (click the **lghub-lite** title, or **Skins…** in the tray menu) opens the skin manager: five built-in looks, colour editing (edits are saved as your
   own skin), and **Load skin file…** / **Export current** to share skins as small `.json`
   files. You can also drop a skin file on the window. Custom skins live in
   `%APPDATA%\lghub-lite\skins\`.
+
+  <p align="center"><img src="docs/screenshots/skins.png" width="800" alt="The skin manager next to the widget"></p>
 
 The round buttons in the title bar minimise the widget or hide it to the **tray**; drag the
 title bar to move it. Use the tray menu's **Quit** to exit.
@@ -201,17 +224,26 @@ logs live in its folder).
 Requires the Rust MSVC toolchain.
 
 ```text
-cargo build --release --workspace
+cargo build --release
 ```
 
-This builds `lghub-lite.exe` (CLI), `lghub-lite-bg.exe` (background watcher) and
-`lghub-lite-gui.exe` (app) in `target\release\`.
-- The CLI and watcher need Rust 1.88+ and depend only on
-  [`windows-sys`](https://crates.io/crates/windows-sys) (raw Windows API bindings).
-- The app is a separate package in `gui/`. It uses [egui](https://github.com/emilk/egui) and
-  [tray-icon](https://crates.io/crates/tray-icon) and needs Rust 1.95+.
+builds `lghub-lite.exe` (CLI) and `lghub-lite-bg.exe` (background watcher) in
+`target\release\`. They need Rust 1.88+ and depend only on
+[`windows-sys`](https://crates.io/crates/windows-sys) (raw Windows API bindings).
 
-Tests run without hardware: `cargo test --workspace`.
+The app is its own project in `gui/` (it uses the CLI's code as a library):
+
+```text
+cd gui
+cargo build --release
+```
+
+builds `gui\target\release\lghub-lite-gui.exe`. It uses [egui](https://github.com/emilk/egui)
+and [tray-icon](https://crates.io/crates/tray-icon) and needs Rust 1.95+.
+`lghub-lite-gui.exe --demo` shows sample devices without touching any hardware (that is how the
+screenshots above were made).
+
+Tests run without hardware: `cargo test`, in the root and in `gui/`.
 
 ## How it works
 

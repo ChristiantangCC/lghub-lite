@@ -10,3 +10,4 @@ LGHUB/
 *.xml
 /design-ref/
 /.claude/
+/gui/target

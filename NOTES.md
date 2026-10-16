@@ -68,6 +68,7 @@ A Cargo workspace: the core package (one library plus two thin binaries; no trai
 - `src/profiles.rs`: onboard memory read path (0x8100 f0/f4/f5/f10), CRC-CCITT, directory parsing, dump format.
 - `src/audio.rs`: headset features 0x1F20 (battery voltage) and 0x8310 (EQ read).
 - `src/battery.rs`: voltage-to-percent curves (measured / G HUB file / built-in / generic estimate), the voltage recording and the curve builder, all in fixed-point integers.
+- `gui/`: the desktop app, a separate Cargo project (own `Cargo.lock`, `target/`, `[workspace]`) that uses the root as a library. The root has no workspace, so deleting `gui/` leaves a working CLI-only tree (checked by building a copy without it, 2026-10-16). README screenshots come from `lghub-lite-gui.exe --demo` (`docs/screenshots/`).
 - `dev/` (not part of the app): `agent.ps1` (GET-only G HUB agent client) and `calibrate.ps1` (logs lghub-lite vs G HUB battery readings to `%APPDATA%\lghub-lite\battery-calibration.csv`).
 
 **Threads.** Our code runs on one thread. Windows runs the `CM_Register_Notification` callback on a thread-pool thread. The callback only calls `SetEvent`, and the main thread waits on that event; no window or message loop is needed. While idle the process has 1 thread [HW, see §8].

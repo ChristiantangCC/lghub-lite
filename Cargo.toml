@@ -1,6 +1,5 @@
-[workspace]
-# The GUI is a separate package so the core (CLI + bg) keeps a single dependency.
-members = [".", "gui"]
+# The desktop app lives in gui/ as its own project (its own Cargo.lock and target/), so this
+# root stays a CLI-only project with a single dependency, and deleting gui/ changes nothing here.
 
 [package]
 name = "lghub-lite"
